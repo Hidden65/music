@@ -159,6 +159,15 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
         elif path == '/api/trending':
             self.handle_api_trending()
             return
+        elif path == '/api/search_multi':
+            self.handle_api_search_multi(parsed.query)
+            return
+        elif path == '/api/album':
+            self.handle_api_album(parsed.query)
+            return
+        elif path == '/api/artist':
+            self.handle_api_artist(parsed.query)
+            return
         elif path == '/api/recommendations':
             self.handle_api_recommendations(parsed.query)
             return
@@ -233,6 +242,125 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
         results = [r for r in results if r.get('videoId')][:20]
         
         self.send_json_response({'results': results})
+
+    def handle_api_search_multi(self, query_string: str) -> None:
+        """Return songs, albums, and artists for a query"""
+        params = urllib.parse.parse_qs(query_string or '')
+        q_list = params.get('q', [''])
+        q = (q_list[0] if q_list else '').strip()
+        out = {'songs': [], 'albums': [], 'artists': []}
+        if not q:
+            self.send_json_response(out)
+            return
+        if self.ytmusic:
+            try:
+                songs = self.ytmusic.search(q, filter='songs', limit=15)
+                out['songs'] = [map_song_result(s) for s in songs if s]
+                albums = self.ytmusic.search(q, filter='albums', limit=15)
+                out['albums'] = [
+                    {
+                        'albumId': a.get('browseId') or a.get('playlistId') or a.get('videoId'),
+                        'title': a.get('title') or a.get('name'),
+                        'artist': ', '.join([ar.get('name') for ar in (a.get('artists') or []) if ar.get('name')]) if a.get('artists') else None,
+                        'thumbnail': (a.get('thumbnails') or [{}])[-1].get('url') if a.get('thumbnails') else None
+                    }
+                    for a in albums if a
+                ]
+                artists = self.ytmusic.search(q, filter='artists', limit=15)
+                out['artists'] = [
+                    {
+                        'artistId': ar.get('browseId') or ar.get('channelId'),
+                        'name': ar.get('artist') or ar.get('title') or ar.get('name'),
+                        'thumbnail': (ar.get('thumbnails') or [{}])[-1].get('url') if ar.get('thumbnails') else None
+                    }
+                    for ar in artists if ar
+                ]
+            except Exception as e:
+                print(f"search_multi error: {e}")
+                out = self._demo_search_multi(q)
+        else:
+            out = self._demo_search_multi(q)
+        self.send_json_response(out)
+
+    def handle_api_album(self, query_string: str) -> None:
+        params = urllib.parse.parse_qs(query_string or '')
+        album_id = (params.get('id', [''])[0] or '').strip()
+        if not album_id:
+            self.send_json_response({'error': 'Album id required'}, 400)
+            return
+        if self.ytmusic:
+            try:
+                album = self.ytmusic.get_album(album_id)
+                tracks = album.get('tracks') or []
+                songs = [map_song_result(t) for t in tracks]
+                data = {
+                    'albumId': album_id,
+                    'title': album.get('title'),
+                    'artist': (album.get('artists') or [{}])[0].get('name') if album.get('artists') else None,
+                    'thumbnail': ((album.get('thumbnails') or [{}])[-1]).get('url') if album.get('thumbnails') else None,
+                    'songs': songs
+                }
+                self.send_json_response({'album': data})
+                return
+            except Exception as e:
+                print(f"album error: {e}")
+        # demo fallback
+        self.send_json_response({'album': {
+            'albumId': album_id,
+            'title': f'Demo Album {album_id}',
+            'artist': 'Demo Artist',
+            'thumbnail': None,
+            'songs': get_demo_results('album')
+        }})
+
+    def handle_api_artist(self, query_string: str) -> None:
+        params = urllib.parse.parse_qs(query_string or '')
+        artist_id = (params.get('id', [''])[0] or '').strip()
+        if not artist_id:
+            self.send_json_response({'error': 'Artist id required'}, 400)
+            return
+        if self.ytmusic:
+            try:
+                artist = self.ytmusic.get_artist(artist_id)
+                songs = []
+                for sec in (artist.get('songs', {}) or {}).get('results', []) or []:
+                    songs.append(map_song_result(sec))
+                data = {
+                    'artistId': artist_id,
+                    'name': artist.get('name'),
+                    'thumbnail': ((artist.get('thumbnails') or [{}])[-1]).get('url') if artist.get('thumbnails') else None,
+                    'songs': songs or get_demo_results('artist')
+                }
+                self.send_json_response({'artist': data})
+                return
+            except Exception as e:
+                print(f"artist error: {e}")
+        self.send_json_response({'artist': {
+            'artistId': artist_id,
+            'name': f'Demo Artist {artist_id}',
+            'thumbnail': None,
+            'songs': get_demo_results('artist')
+        }})
+
+    def _demo_search_multi(self, q: str) -> Dict[str, Any]:
+        return {
+            'songs': get_demo_results(q),
+            'albums': [
+                {
+                    'albumId': f'alb_{i}',
+                    'title': f'Demo Album {i} - {q}',
+                    'artist': f'Demo Artist {i}',
+                    'thumbnail': f'https://via.placeholder.com/120x120/10b981/ffffff?text=Album+{i}'
+                } for i in range(1, 9)
+            ],
+            'artists': [
+                {
+                    'artistId': f'art_{i}',
+                    'name': f'Demo Artist {i} - {q}',
+                    'thumbnail': f'https://via.placeholder.com/120x120/f59e0b/ffffff?text=Artist+{i}'
+                } for i in range(1, 9)
+            ]
+        }
 
     def handle_api_trending(self) -> None:
         """Handle trending music requests"""
