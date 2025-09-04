@@ -597,7 +597,7 @@ if __name__ == '__main__':
     port = int(os.environ.get('PORT', '5000'))
     
     print(f"🎵 Wave Music Streaming Server")
-    print(f"📡 Server starting on http://localhost:{port}")
+    print(f"📡 Server starting on https://music-h3vv.onrender.com:{port}")
     print(f"🔍 YTMusic API: {'✅ Available' if YTMUSIC_AVAILABLE else '❌ Not available (using demo mode)'}")
     print(f"💾 Database: SQLite ({DB_PATH})")
     print("🚀 Ready to serve music!")
