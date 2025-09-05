@@ -384,30 +384,13 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
         params = urllib.parse.parse_qs(query_string or '')
         user_id = params.get('userId', [''])[0]
         
-        print(f"Received request for liked songs with userId: {user_id}")
-        print(f"Full query string: {query_string}")
-        print(f"Parsed params: {params}")
-        
         if not user_id:
-            print("Error: No userId provided in request")
             self.send_json_response({'error': 'User ID required'}, 400)
             return
         
         try:
             conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
-            print(f"Querying database for liked songs with userId: {user_id}")
-            
-            # Check if user exists in database
-            cursor.execute('SELECT COUNT(*) FROM users WHERE id = ?', (user_id,))
-            user_exists = cursor.fetchone()[0] > 0
-            print(f"User exists in database: {user_exists}")
-            
-            # Get count of liked songs for this user
-            cursor.execute('SELECT COUNT(*) FROM liked_songs WHERE user_id = ?', (user_id,))
-            liked_count = cursor.fetchone()[0]
-            print(f"Found {liked_count} liked songs for user {user_id}")
-            
             cursor.execute('''
                 SELECT video_id, title, artist, thumbnail, duration 
                 FROM liked_songs 
@@ -425,17 +408,11 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
                     'duration': row[4]
                 })
             
-            print(f"Returning {len(results)} liked songs for user {user_id}")
-            if results:
-                print(f"First liked song: {results[0]}")
-            
             conn.close()
             self.send_json_response({'results': results})
             
         except Exception as e:
             print(f"Error fetching liked songs: {e}")
-            import traceback
-            print(traceback.format_exc())
             self.send_json_response({'error': 'Internal server error'}, 500)
 
     def handle_api_user_playlists(self, query_string: str) -> None:
@@ -541,16 +518,12 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
             user_id = data.get('userId')
             song = data.get('song', {})
             
-            print(f"Received like request with userId: {user_id}, videoId: {song.get('videoId')}")
-            
             if not user_id or not song.get('videoId'):
-                print("Error: Missing userId or videoId in like request")
                 self.send_json_response({'error': 'Invalid data'}, 400)
                 return
             
             conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
-            print(f"Inserting liked song into database: {song.get('title')} for user {user_id}")
             cursor.execute('''
                 INSERT OR IGNORE INTO liked_songs 
                 (user_id, video_id, title, artist, thumbnail, duration)
@@ -561,7 +534,6 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
             conn.commit()
             conn.close()
             
-            print(f"Successfully liked song {song.get('videoId')} for user {user_id}")
             self.send_json_response({'success': True})
             
         except Exception as e:
@@ -578,28 +550,20 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
             user_id = data.get('userId')
             video_id = data.get('videoId')
             
-            print(f"Received unlike request with userId: {user_id}, videoId: {video_id}")
-            
             if not user_id or not video_id:
-                print("Error: Missing userId or videoId in unlike request")
                 self.send_json_response({'error': 'Invalid data'}, 400)
                 return
             
             conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
-            print(f"Deleting liked song from database: videoId {video_id} for user {user_id}")
             cursor.execute('''
                 DELETE FROM liked_songs 
                 WHERE user_id = ? AND video_id = ?
             ''', (user_id, video_id))
             
-            rows_affected = cursor.rowcount
-            print(f"Rows affected by unlike operation: {rows_affected}")
-            
             conn.commit()
             conn.close()
             
-            print(f"Successfully unliked song {video_id} for user {user_id}")
             self.send_json_response({'success': True})
             
         except Exception as e:
