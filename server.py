@@ -173,11 +173,16 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
             return
         
         # Serve static files
-        if path == '/':
-            self.path = '/static/index.html'
-        elif path.startswith('/static/'):
-            # Keep the path as is for static files
-            pass
+       if path == '/':
+    index_path = os.path.join(ROOT_DIR, 'static', 'index.html')
+    if os.path.exists(index_path):
+        self.path = '/static/index.html'
+    else:
+        self.send_json_response({'message': '🎵 Wave Music API is running. Use /api endpoints.'})
+        return
+elif path.startswith('/static/'):
+    pass
+
         
         return super().do_GET()
 
