@@ -2,6 +2,7 @@ import os
 import json
 import posixpath
 import urllib.parse
+import urllib.request
 from typing import List, Dict, Any, Optional
 from http.server import SimpleHTTPRequestHandler
 from socketserver import ThreadingTCPServer
@@ -689,49 +690,55 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
             return
         
         try:
-            import requests
-            
             # Clean title and artist for better API matching
             clean_title = title.replace('[', '').replace(']', '').replace('(', '').replace(')', '').strip()
             clean_artist = artist.replace('[', '').replace(']', '').replace('(', '').replace(')', '').strip() if artist else 'Unknown'
             
-            # Try lyrics.ovh API first
+            print(f"Lyrics request: '{clean_title}' by '{clean_artist}'")
+            
+            # Try lyrics.ovh API using urllib instead of requests
             try:
                 url = f"https://api.lyrics.ovh/v1/{urllib.parse.quote(clean_artist)}/{urllib.parse.quote(clean_title)}"
-                response = requests.get(url, timeout=10)
+                print(f"Trying URL: {url}")
                 
-                if response.status_code == 200:
-                    data = response.json()
-                    if data.get('lyrics') and data['lyrics'].strip():
-                        self.send_json_response({
-                            'success': True,
-                            'lyrics': data['lyrics'],
-                            'source': 'lyrics.ovh'
-                        })
-                        return
-            except Exception as e:
-                print(f"Lyrics.ovh API error: {e}")
-            
-            # Fallback: Try alternative lyrics source
-            try:
-                # Try with just the title if artist search failed
-                if clean_artist != 'Unknown':
-                    url = f"https://api.lyrics.ovh/v1/Unknown/{urllib.parse.quote(clean_title)}"
-                    response = requests.get(url, timeout=10)
-                    
-                    if response.status_code == 200:
-                        data = response.json()
+                with urllib.request.urlopen(url, timeout=10) as response:
+                    if response.status == 200:
+                        data = json.loads(response.read().decode('utf-8'))
+                        print(f"API response: {data}")
+                        
                         if data.get('lyrics') and data['lyrics'].strip():
                             self.send_json_response({
                                 'success': True,
                                 'lyrics': data['lyrics'],
-                                'source': 'lyrics.ovh (title only)'
+                                'source': 'lyrics.ovh'
                             })
                             return
+            except Exception as e:
+                print(f"Lyrics.ovh API error: {e}")
+            
+            # Fallback: Try with just the title if artist search failed
+            try:
+                if clean_artist != 'Unknown':
+                    url = f"https://api.lyrics.ovh/v1/Unknown/{urllib.parse.quote(clean_title)}"
+                    print(f"Trying fallback URL: {url}")
+                    
+                    with urllib.request.urlopen(url, timeout=10) as response:
+                        if response.status == 200:
+                            data = json.loads(response.read().decode('utf-8'))
+                            print(f"Fallback API response: {data}")
+                            
+                            if data.get('lyrics') and data['lyrics'].strip():
+                                self.send_json_response({
+                                    'success': True,
+                                    'lyrics': data['lyrics'],
+                                    'source': 'lyrics.ovh (title only)'
+                                })
+                                return
             except Exception as e:
                 print(f"Title-only lyrics search error: {e}")
             
             # If no lyrics found
+            print("No lyrics found for this song")
             self.send_json_response({
                 'success': False,
                 'error': 'Lyrics not found for this song',
