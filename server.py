@@ -171,6 +171,9 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
             playlist_id = path.split('/')[-1]
             self.handle_api_playlist(playlist_id)
             return
+        elif path == '/api/lyrics':
+            self.handle_api_lyrics(parsed.query)
+            return
         
         # Serve static files
         if path == '/':
@@ -673,6 +676,70 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
             
         except Exception as e:
             print(f"Error removing song from playlist: {e}")
+            self.send_json_response({'error': 'Internal server error'}, 500)
+
+    def handle_api_lyrics(self, query_string: str) -> None:
+        """Handle lyrics requests"""
+        params = urllib.parse.parse_qs(query_string or '')
+        title = params.get('title', [''])[0].strip()
+        artist = params.get('artist', [''])[0].strip()
+        
+        if not title:
+            self.send_json_response({'error': 'Song title required'}, 400)
+            return
+        
+        try:
+            import requests
+            
+            # Clean title and artist for better API matching
+            clean_title = title.replace('[', '').replace(']', '').replace('(', '').replace(')', '').strip()
+            clean_artist = artist.replace('[', '').replace(']', '').replace('(', '').replace(')', '').strip() if artist else 'Unknown'
+            
+            # Try lyrics.ovh API first
+            try:
+                url = f"https://api.lyrics.ovh/v1/{urllib.parse.quote(clean_artist)}/{urllib.parse.quote(clean_title)}"
+                response = requests.get(url, timeout=10)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    if data.get('lyrics') and data['lyrics'].strip():
+                        self.send_json_response({
+                            'success': True,
+                            'lyrics': data['lyrics'],
+                            'source': 'lyrics.ovh'
+                        })
+                        return
+            except Exception as e:
+                print(f"Lyrics.ovh API error: {e}")
+            
+            # Fallback: Try alternative lyrics source
+            try:
+                # Try with just the title if artist search failed
+                if clean_artist != 'Unknown':
+                    url = f"https://api.lyrics.ovh/v1/Unknown/{urllib.parse.quote(clean_title)}"
+                    response = requests.get(url, timeout=10)
+                    
+                    if response.status_code == 200:
+                        data = response.json()
+                        if data.get('lyrics') and data['lyrics'].strip():
+                            self.send_json_response({
+                                'success': True,
+                                'lyrics': data['lyrics'],
+                                'source': 'lyrics.ovh (title only)'
+                            })
+                            return
+            except Exception as e:
+                print(f"Title-only lyrics search error: {e}")
+            
+            # If no lyrics found
+            self.send_json_response({
+                'success': False,
+                'error': 'Lyrics not found for this song',
+                'message': 'The lyrics database does not contain this song yet'
+            }, 404)
+            
+        except Exception as e:
+            print(f"Lyrics API error: {e}")
             self.send_json_response({'error': 'Internal server error'}, 500)
 
     def send_json_response(self, data: Dict[str, Any], status_code: int = 200) -> None:
