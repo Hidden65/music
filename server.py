@@ -117,18 +117,8 @@ def map_song_result(item: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 def get_demo_results(query: str) -> List[Dict[str, Any]]:
-    """Return demo search results when YTMusic is not available"""
-    demo_songs = [
-        {
-            'videoId': f'demo_{i}_{int(time.time())}',
-            'title': f'Demo Song {i} - {query}',
-            'artist': f'Demo Artist {i}',
-            'duration': f'{2 + i}:{30 + (i * 10):02d}',
-            'thumbnail': f'https://via.placeholder.com/120x120/{["6366f1", "8b5cf6", "ec4899", "10b981", "f59e0b"][i % 5]}/ffffff?text=Song+{i}'
-        }
-        for i in range(1, 11)
-    ]
-    return demo_songs
+    """Return empty results when YTMusic is not available"""
+    return []
 
 class YTMusicRequestHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
@@ -184,10 +174,10 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
         
         # Serve static files
         if path == '/':
-            self.path = '/index.html'
-        elif path == '/static/app.js':
-            # Serve the original app.js or a simplified version
-            self.path = '/app.js'
+            self.path = '/static/index.html'
+        elif path.startswith('/static/'):
+            # Keep the path as is for static files
+            pass
         
         return super().do_GET()
 
@@ -304,13 +294,13 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
                 return
             except Exception as e:
                 print(f"album error: {e}")
-        # demo fallback
+        # Empty album response when API is unavailable
         self.send_json_response({'album': {
             'albumId': album_id,
-            'title': f'Demo Album {album_id}',
-            'artist': 'Demo Artist',
+            'title': 'Album Unavailable',
+            'artist': 'Unknown Artist',
             'thumbnail': None,
-            'songs': get_demo_results('album')
+            'songs': []
         }})
 
     def handle_api_artist(self, query_string: str) -> None:
@@ -337,29 +327,17 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
                 print(f"artist error: {e}")
         self.send_json_response({'artist': {
             'artistId': artist_id,
-            'name': f'Demo Artist {artist_id}',
+            'name': 'Artist Unavailable',
             'thumbnail': None,
-            'songs': get_demo_results('artist')
+            'songs': []
         }})
 
     def _demo_search_multi(self, q: str) -> Dict[str, Any]:
+        # Return empty results for demo mode
         return {
-            'songs': get_demo_results(q),
-            'albums': [
-                {
-                    'albumId': f'alb_{i}',
-                    'title': f'Demo Album {i} - {q}',
-                    'artist': f'Demo Artist {i}',
-                    'thumbnail': f'https://via.placeholder.com/120x120/10b981/ffffff?text=Album+{i}'
-                } for i in range(1, 9)
-            ],
-            'artists': [
-                {
-                    'artistId': f'art_{i}',
-                    'name': f'Demo Artist {i} - {q}',
-                    'thumbnail': f'https://via.placeholder.com/120x120/f59e0b/ffffff?text=Artist+{i}'
-                } for i in range(1, 9)
-            ]
+            'songs': [],
+            'albums': [],
+            'artists': []
         }
 
     def handle_api_trending(self) -> None:
@@ -374,9 +352,9 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
                     results = []
             except Exception as e:
                 print(f"Trending error: {e}")
-                results = get_demo_results("trending")
+                results = []
         else:
-            results = get_demo_results("trending")
+            results = []
         
         self.send_json_response({'results': results})
 
@@ -395,9 +373,9 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
                     results = [map_song_result(track) for track in watch_playlist['tracks']]
             except Exception as e:
                 print(f"Recommendations error: {e}")
-                results = get_demo_results("recommendations")
+                results = []
         else:
-            results = get_demo_results("recommendations")
+            results = []
         
         self.send_json_response({'results': results})
 
@@ -722,16 +700,21 @@ if __name__ == '__main__':
     # Initialize database
     init_database()
     
-    port = int(os.environ.get('PORT', '5000'))
+    import argparse
+    parser = argparse.ArgumentParser(description='Wave Music Streaming Server')
+    parser.add_argument('--port', type=int, default=5000, help='Port to run the server on')
+    args = parser.parse_args()
+    
+    port = int(os.environ.get('PORT', args.port))
     
     print(f"🎵 Wave Music Streaming Server")
-    print(f"📡 Server starting on https://music-h3vv.onrender.com:{port}")
+    print(f"📡 Server starting on http://localhost:{port}")
     print(f"🔍 YTMusic API: {'✅ Available' if YTMUSIC_AVAILABLE else '❌ Not available (using demo mode)'}")
     print(f"💾 Database: SQLite ({DB_PATH})")
     print("🚀 Ready to serve music!")
     
     try:
-        with ThreadingTCPServer(('0.0.0.0', port), YTMusicRequestHandler) as httpd:
+        with ThreadingTCPServer(('localhost', port), YTMusicRequestHandler) as httpd:
             httpd.serve_forever()
     except KeyboardInterrupt:
         print("\n👋 Server stopped gracefully")
