@@ -708,13 +708,13 @@ if __name__ == '__main__':
     port = int(os.environ.get('PORT', args.port))
     
     print(f"🎵 Wave Music Streaming Server")
-    print(f"📡 Server starting on http://localhost:{port}")
+    print(f"📡 Server starting on http://0.0.0.0:{port}")
     print(f"🔍 YTMusic API: {'✅ Available' if YTMUSIC_AVAILABLE else '❌ Not available (using demo mode)'}")
     print(f"💾 Database: SQLite ({DB_PATH})")
     print("🚀 Ready to serve music!")
     
     try:
-        with ThreadingTCPServer(('localhost', port), YTMusicRequestHandler) as httpd:
+        with ThreadingTCPServer(('0.0.0.0', port), YTMusicRequestHandler) as httpd:
             httpd.serve_forever()
     except KeyboardInterrupt:
         print("\n👋 Server stopped gracefully")
