@@ -1,1 +1,3 @@
 ytmusicapi
+flask
+gunicorn
