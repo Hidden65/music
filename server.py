@@ -196,6 +196,8 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
             self.handle_api_playlist_add_song()
         elif path == '/api/playlist/remove-song':
             self.handle_api_playlist_remove_song()
+        elif path == '/api/audio':
+            self.handle_api_audio(parsed.query)
         else:
             self.send_error(404, "Not Found")
 
@@ -673,6 +675,36 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
             
         except Exception as e:
             print(f"Error removing song from playlist: {e}")
+            self.send_json_response({'error': 'Internal server error'}, 500)
+
+    def handle_api_audio(self, query_string: str) -> None:
+        """Handle audio stream requests for background playback"""
+        params = urllib.parse.parse_qs(query_string or '')
+        video_id = params.get('videoId', [''])[0]
+        
+        if not video_id:
+            self.send_json_response({'error': 'Video ID required'}, 400)
+            return
+        
+        try:
+            # For now, return a placeholder audio URL
+            # In production, you'd integrate with yt-dlp or similar service
+            audio_url = f"https://www.youtube.com/watch?v={video_id}"
+            
+            # You could also use services like:
+            # - yt-dlp to extract audio
+            # - YouTube's audio-only streams (if available)
+            # - Third-party audio extraction services
+            
+            self.send_json_response({
+                'videoId': video_id,
+                'audioUrl': audio_url,
+                'format': 'audio/mp4',
+                'note': 'This is a placeholder. In production, integrate with yt-dlp or similar service.'
+            })
+            
+        except Exception as e:
+            print(f"Error getting audio stream: {e}")
             self.send_json_response({'error': 'Internal server error'}, 500)
 
     def send_json_response(self, data: Dict[str, Any], status_code: int = 200) -> None:
