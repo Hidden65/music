@@ -164,6 +164,9 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
         elif path == '/api/lyrics':
             self.handle_api_lyrics(parsed.query)
             return
+        elif path == '/api/yt_playlist':
+            self.handle_api_yt_playlist(parsed.query)
+            return
         elif path == '/api/user/liked':
             self.handle_api_user_liked(parsed.query)
             return
@@ -399,6 +402,24 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
         except Exception as e:
             print(f"lyrics error: {e}")
         self.send_json_response({'lyrics': lyrics_text or '', 'source': source, 'synced': bool(lyrics_text and ('[' in lyrics_text and ']' in lyrics_text))})
+
+    def handle_api_yt_playlist(self, query_string: str) -> None:
+        """Fetch a YouTube Music playlist by browseId and map to songs list"""
+        params = urllib.parse.parse_qs(query_string or '')
+        browse_id = (params.get('id', [''])[0] or '').strip()
+        if not browse_id:
+            self.send_json_response({'error': 'id required'}, 400)
+            return
+        out: Dict[str, Any] = {'title': None, 'songs': []}
+        if self.ytmusic:
+            try:
+                pl = self.ytmusic.get_playlist(browse_id, limit=100)
+                out['title'] = pl.get('title')
+                tracks = pl.get('tracks') or []
+                out['songs'] = [map_song_result(t) for t in tracks if t]
+            except Exception as e:
+                print(f"yt_playlist error: {e}")
+        self.send_json_response({'playlist': out})
 
     def handle_api_trending(self) -> None:
         """Handle trending music requests"""
