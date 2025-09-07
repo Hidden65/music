@@ -80,6 +80,21 @@ def init_database():
     conn.commit()
     conn.close()
 
+def is_english_text(text: str) -> bool:
+    """Check if text is primarily in English"""
+    if not text:
+        return True
+    
+    # Count English characters vs non-English characters
+    english_chars = sum(1 for c in text if c.isascii() and c.isalpha())
+    total_chars = sum(1 for c in text if c.isalpha())
+    
+    if total_chars == 0:
+        return True
+    
+    # Consider text English if more than 70% of alphabetic characters are ASCII
+    return (english_chars / total_chars) > 0.7
+
 def map_song_result(item: Dict[str, Any]) -> Dict[str, Any]:
     """Map YouTube Music API result to standardized format"""
     video_id = item.get('videoId') or (item.get('navigationEndpoint', {}).get('watchEndpoint', {}).get('videoId'))
@@ -171,6 +186,9 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
             playlist_id = path.split('/')[-1]
             self.handle_api_playlist(playlist_id)
             return
+        elif path == '/api/lyrics':
+            self.handle_api_lyrics(parsed.query)
+            return
         
         # Serve static files
         if path == '/':
@@ -234,18 +252,21 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
         self.send_json_response({'results': results})
 
     def handle_api_search_multi(self, query_string: str) -> None:
-        """Return songs, albums, and artists for a query"""
+        """Return songs, albums, artists, playlists, and podcasts for a query"""
         params = urllib.parse.parse_qs(query_string or '')
         q_list = params.get('q', [''])
         q = (q_list[0] if q_list else '').strip()
-        out = {'songs': [], 'albums': [], 'artists': []}
+        out = {'songs': [], 'albums': [], 'artists': [], 'playlists': [], 'podcasts': []}
         if not q:
             self.send_json_response(out)
             return
         if self.ytmusic:
             try:
+                # Search for songs
                 songs = self.ytmusic.search(q, filter='songs', limit=15)
                 out['songs'] = [map_song_result(s) for s in songs if s]
+                
+                # Search for albums
                 albums = self.ytmusic.search(q, filter='albums', limit=15)
                 out['albums'] = [
                     {
@@ -256,6 +277,8 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
                     }
                     for a in albums if a
                 ]
+                
+                # Search for artists
                 artists = self.ytmusic.search(q, filter='artists', limit=15)
                 out['artists'] = [
                     {
@@ -265,6 +288,42 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
                     }
                     for ar in artists if ar
                 ]
+                
+                # Search for playlists
+                playlists = self.ytmusic.search(q, filter='playlists', limit=15)
+                out['playlists'] = [
+                    {
+                        'playlistId': p.get('browseId') or p.get('playlistId'),
+                        'title': p.get('title') or p.get('name'),
+                        'author': p.get('author') or p.get('artist'),
+                        'thumbnail': (p.get('thumbnails') or [{}])[-1].get('url') if p.get('thumbnails') else None,
+                        'songCount': p.get('songCount') or p.get('itemCount')
+                    }
+                    for p in playlists if p
+                ]
+                
+                # Search for podcasts (using community playlists as a proxy)
+                try:
+                    podcasts = self.ytmusic.search(q, filter='community_playlists', limit=15)
+                    out['podcasts'] = [
+                        {
+                            'podcastId': p.get('browseId') or p.get('playlistId'),
+                            'title': p.get('title') or p.get('name'),
+                            'author': p.get('author') or p.get('artist'),
+                            'thumbnail': (p.get('thumbnails') or [{}])[-1].get('url') if p.get('thumbnails') else None,
+                            'episodeCount': p.get('songCount') or p.get('itemCount')
+                        }
+                        for p in podcasts if p and (
+                            'podcast' in (p.get('title', '') + p.get('name', '')).lower() or
+                            'episode' in (p.get('title', '') + p.get('name', '')).lower() or
+                            'show' in (p.get('title', '') + p.get('name', '')).lower() or
+                            'radio' in (p.get('title', '') + p.get('name', '')).lower()
+                        )
+                    ]
+                except Exception as e:
+                    print(f"Podcast search error: {e}")
+                    out['podcasts'] = []
+                    
             except Exception as e:
                 print(f"search_multi error: {e}")
                 out = self._demo_search_multi(q)
@@ -337,7 +396,9 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
         return {
             'songs': [],
             'albums': [],
-            'artists': []
+            'artists': [],
+            'playlists': [],
+            'podcasts': []
         }
 
     def handle_api_trending(self) -> None:
@@ -457,6 +518,7 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
     def handle_api_playlist(self, playlist_id: str) -> None:
         """Handle individual playlist data"""
         try:
+            # First try to get from local database
             conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
             
@@ -468,41 +530,80 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
             ''', (playlist_id,))
             
             playlist_row = cursor.fetchone()
-            if not playlist_row:
+            if playlist_row:
+                # Found in local database
+                # Get playlist songs
+                cursor.execute('''
+                    SELECT video_id, title, artist, thumbnail, duration, position
+                    FROM playlist_songs
+                    WHERE playlist_id = ?
+                    ORDER BY position ASC
+                ''', (playlist_id,))
+                
+                songs = []
+                for row in cursor.fetchall():
+                    songs.append({
+                        'videoId': row[0],
+                        'title': row[1],
+                        'artist': row[2],
+                        'thumbnail': row[3],
+                        'duration': row[4],
+                        'position': row[5]
+                    })
+                
                 conn.close()
-                self.send_json_response({'error': 'Playlist not found'}, 404)
+                
+                playlist_data = {
+                    'id': playlist_id,
+                    'name': playlist_row[0],
+                    'description': playlist_row[1],
+                    'createdAt': playlist_row[2],
+                    'songs': songs
+                }
+                
+                self.send_json_response({'playlist': playlist_data})
                 return
-            
-            # Get playlist songs
-            cursor.execute('''
-                SELECT video_id, title, artist, thumbnail, duration, position
-                FROM playlist_songs
-                WHERE playlist_id = ?
-                ORDER BY position ASC
-            ''', (playlist_id,))
-            
-            songs = []
-            for row in cursor.fetchall():
-                songs.append({
-                    'videoId': row[0],
-                    'title': row[1],
-                    'artist': row[2],
-                    'thumbnail': row[3],
-                    'duration': row[4],
-                    'position': row[5]
-                })
             
             conn.close()
             
-            playlist_data = {
-                'id': playlist_id,
-                'name': playlist_row[0],
-                'description': playlist_row[1],
-                'createdAt': playlist_row[2],
-                'songs': songs
-            }
+            # Not found in local database, try YouTube Music API
+            if self.ytmusic:
+                try:
+                    print(f"Fetching YouTube Music playlist: {playlist_id}")
+                    playlist_data = self.ytmusic.get_playlist(playlist_id)
+                    
+                    if playlist_data:
+                        # Convert YouTube Music playlist to our format
+                        tracks = playlist_data.get('tracks', [])
+                        songs = []
+                        
+                        for track in tracks:
+                            if track and track.get('videoId'):
+                                songs.append({
+                                    'videoId': track.get('videoId'),
+                                    'title': track.get('title', 'Unknown Title'),
+                                    'artist': ', '.join([a.get('name', '') for a in track.get('artists', []) if a.get('name')]) or 'Unknown Artist',
+                                    'thumbnail': (track.get('thumbnails') or [{}])[-1].get('url') if track.get('thumbnails') else None,
+                                    'duration': track.get('duration'),
+                                    'position': len(songs)
+                                })
+                        
+                        playlist_info = {
+                            'id': playlist_id,
+                            'name': playlist_data.get('title', 'Unknown Playlist'),
+                            'description': playlist_data.get('description', ''),
+                            'createdAt': None,
+                            'songs': songs
+                        }
+                        
+                        self.send_json_response({'playlist': playlist_info})
+                        return
+                        
+                except Exception as e:
+                    print(f"Error fetching YouTube Music playlist: {e}")
             
-            self.send_json_response({'playlist': playlist_data})
+            # Not found anywhere
+            self.send_json_response({'error': 'Playlist not found'}, 404)
             
         except Exception as e:
             print(f"Error fetching playlist: {e}")
@@ -674,6 +775,302 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
         except Exception as e:
             print(f"Error removing song from playlist: {e}")
             self.send_json_response({'error': 'Internal server error'}, 500)
+
+    def handle_api_lyrics(self, query_string: str) -> None:
+        """Handle lyrics requests for songs"""
+        params = urllib.parse.parse_qs(query_string or '')
+        video_id = params.get('videoId', [''])[0]
+        
+        if not video_id:
+            self.send_json_response({'error': 'Video ID required'}, 400)
+            return
+        
+        # For now, let's provide sample lyrics for testing
+        # In a real implementation, you would integrate with a lyrics API
+        sample_lyrics = {
+            'dQw4w9WgXcQ': {
+                'lyrics': '''Never gonna give you up
+Never gonna let you down
+Never gonna run around and desert you
+Never gonna make you cry
+Never gonna say goodbye
+Never gonna tell a lie and hurt you
+
+We've known each other for so long
+Your heart's been aching but you're too shy to say it
+Inside we both know what's been going on
+We know the game and we're gonna play it
+
+And if you ask me how I'm feeling
+Don't tell me you're too blind to see
+
+Never gonna give you up
+Never gonna let you down
+Never gonna run around and desert you
+Never gonna make you cry
+Never gonna say goodbye
+Never gonna tell a lie and hurt you
+
+We've known each other for so long
+Your heart's been aching but you're too shy to say it
+Inside we both know what's been going on
+We know the game and we're gonna play it
+
+And if you ask me how I'm feeling
+Don't tell me you're too blind to see
+
+Never gonna give you up
+Never gonna let you down
+Never gonna run around and desert you
+Never gonna make you cry
+Never gonna say goodbye
+Never gonna tell a lie and hurt you''',
+                'synchronized': [
+                    {'text': 'Never gonna give you up', 'startTime': 0.0, 'endTime': 3.0},
+                    {'text': 'Never gonna let you down', 'startTime': 3.0, 'endTime': 6.0},
+                    {'text': 'Never gonna run around and desert you', 'startTime': 6.0, 'endTime': 10.0},
+                    {'text': 'Never gonna make you cry', 'startTime': 10.0, 'endTime': 13.0},
+                    {'text': 'Never gonna say goodbye', 'startTime': 13.0, 'endTime': 16.0},
+                    {'text': 'Never gonna tell a lie and hurt you', 'startTime': 16.0, 'endTime': 20.0},
+                    {'text': '', 'startTime': 20.0, 'endTime': 22.0},  # Pause
+                    {'text': 'We\'ve known each other for so long', 'startTime': 22.0, 'endTime': 26.0},
+                    {'text': 'Your heart\'s been aching but you\'re too shy to say it', 'startTime': 26.0, 'endTime': 32.0},
+                    {'text': 'Inside we both know what\'s been going on', 'startTime': 32.0, 'endTime': 36.0},
+                    {'text': 'We know the game and we\'re gonna play it', 'startTime': 36.0, 'endTime': 40.0},
+                    {'text': '', 'startTime': 40.0, 'endTime': 42.0},  # Pause
+                    {'text': 'And if you ask me how I\'m feeling', 'startTime': 42.0, 'endTime': 46.0},
+                    {'text': 'Don\'t tell me you\'re too blind to see', 'startTime': 46.0, 'endTime': 50.0},
+                    {'text': '', 'startTime': 50.0, 'endTime': 52.0},  # Pause
+                    {'text': 'Never gonna give you up', 'startTime': 52.0, 'endTime': 55.0},
+                    {'text': 'Never gonna let you down', 'startTime': 55.0, 'endTime': 58.0},
+                    {'text': 'Never gonna run around and desert you', 'startTime': 58.0, 'endTime': 62.0},
+                    {'text': 'Never gonna make you cry', 'startTime': 62.0, 'endTime': 65.0},
+                    {'text': 'Never gonna say goodbye', 'startTime': 65.0, 'endTime': 68.0},
+                    {'text': 'Never gonna tell a lie and hurt you', 'startTime': 68.0, 'endTime': 72.0},
+                    {'text': '', 'startTime': 72.0, 'endTime': 74.0},  # Pause
+                    {'text': 'We\'ve known each other for so long', 'startTime': 74.0, 'endTime': 78.0},
+                    {'text': 'Your heart\'s been aching but you\'re too shy to say it', 'startTime': 78.0, 'endTime': 84.0},
+                    {'text': 'Inside we both know what\'s been going on', 'startTime': 84.0, 'endTime': 88.0},
+                    {'text': 'We know the game and we\'re gonna play it', 'startTime': 88.0, 'endTime': 92.0},
+                    {'text': '', 'startTime': 92.0, 'endTime': 94.0},  # Pause
+                    {'text': 'And if you ask me how I\'m feeling', 'startTime': 94.0, 'endTime': 98.0},
+                    {'text': 'Don\'t tell me you\'re too blind to see', 'startTime': 98.0, 'endTime': 102.0},
+                    {'text': '', 'startTime': 102.0, 'endTime': 104.0},  # Pause
+                    {'text': 'Never gonna give you up', 'startTime': 104.0, 'endTime': 107.0},
+                    {'text': 'Never gonna let you down', 'startTime': 107.0, 'endTime': 110.0},
+                    {'text': 'Never gonna run around and desert you', 'startTime': 110.0, 'endTime': 114.0},
+                    {'text': 'Never gonna make you cry', 'startTime': 114.0, 'endTime': 117.0},
+                    {'text': 'Never gonna say goodbye', 'startTime': 117.0, 'endTime': 120.0},
+                    {'text': 'Never gonna tell a lie and hurt you', 'startTime': 120.0, 'endTime': 124.0},
+                    {'text': '', 'startTime': 124.0, 'endTime': 130.0},  # Instrumental break
+                    {'text': 'Never gonna give you up', 'startTime': 130.0, 'endTime': 133.0},
+                    {'text': 'Never gonna let you down', 'startTime': 133.0, 'endTime': 136.0},
+                    {'text': 'Never gonna run around and desert you', 'startTime': 136.0, 'endTime': 140.0},
+                    {'text': 'Never gonna make you cry', 'startTime': 140.0, 'endTime': 143.0},
+                    {'text': 'Never gonna say goodbye', 'startTime': 143.0, 'endTime': 146.0},
+                    {'text': 'Never gonna tell a lie and hurt you', 'startTime': 146.0, 'endTime': 150.0},
+                    {'text': '', 'startTime': 150.0, 'endTime': 160.0},  # Extended instrumental
+                    {'text': 'Never gonna give you up', 'startTime': 160.0, 'endTime': 163.0},
+                    {'text': 'Never gonna let you down', 'startTime': 163.0, 'endTime': 166.0},
+                    {'text': 'Never gonna run around and desert you', 'startTime': 166.0, 'endTime': 170.0},
+                    {'text': 'Never gonna make you cry', 'startTime': 170.0, 'endTime': 173.0},
+                    {'text': 'Never gonna say goodbye', 'startTime': 173.0, 'endTime': 176.0},
+                    {'text': 'Never gonna tell a lie and hurt you', 'startTime': 176.0, 'endTime': 180.0},
+                    {'text': '', 'startTime': 180.0, 'endTime': 190.0},  # Final instrumental
+                    {'text': 'Never gonna give you up', 'startTime': 190.0, 'endTime': 193.0},
+                    {'text': 'Never gonna let you down', 'startTime': 193.0, 'endTime': 196.0},
+                    {'text': 'Never gonna run around and desert you', 'startTime': 196.0, 'endTime': 200.0},
+                    {'text': 'Never gonna make you cry', 'startTime': 200.0, 'endTime': 203.0},
+                    {'text': 'Never gonna say goodbye', 'startTime': 203.0, 'endTime': 206.0},
+                    {'text': 'Never gonna tell a lie and hurt you', 'startTime': 206.0, 'endTime': 213.0}
+                ]
+            },
+            '9bZkp7q19f0': {
+                'lyrics': '''This is the way
+I love it
+This is the way
+I love it
+
+I love it when you call me big poppa
+Throw your hands in the air if you's a true player
+I love it when you call me big poppa
+To the honies getting money playing niggas like dummies''',
+                'synchronized': [
+                    {'text': 'This is the way', 'startTime': 0.0, 'endTime': 2.0},
+                    {'text': 'I love it', 'startTime': 2.0, 'endTime': 4.0},
+                    {'text': 'This is the way', 'startTime': 4.0, 'endTime': 6.0},
+                    {'text': 'I love it', 'startTime': 6.0, 'endTime': 8.0}
+                ]
+            },
+            'kJQP7kiw5Fk': {
+                'lyrics': '''Despacito
+Quiero respirar tu cuello despacito
+Deja que te diga cosas al oído
+Para que te acuerdes si no estás conmigo
+
+Despacito
+Quiero desnudarte a besos despacito
+Firmar las paredes de tu laberinto
+Y hacer de tu cuerpo todo un manuscrito''',
+                'synchronized': [
+                    {'text': 'Despacito', 'startTime': 0.0, 'endTime': 2.0},
+                    {'text': 'Quiero respirar tu cuello despacito', 'startTime': 2.0, 'endTime': 5.0},
+                    {'text': 'Deja que te diga cosas al oído', 'startTime': 5.0, 'endTime': 8.0},
+                    {'text': 'Para que te acuerdes si no estás conmigo', 'startTime': 8.0, 'endTime': 12.0}
+                ]
+            }
+        }
+        
+        # Check if we have sample lyrics for this video
+        if video_id in sample_lyrics:
+            print(f"Using sample lyrics for video ID: {video_id}")
+            lyrics_data = sample_lyrics[video_id]
+            self.send_json_response({
+                'lyrics': lyrics_data['lyrics'],
+                'synchronized': lyrics_data['synchronized'],
+                'hasLyrics': True
+            })
+            return
+        
+        # Try to get real lyrics from YouTube Music API
+        if self.ytmusic:
+            try:
+                # Check available methods
+                all_methods = [method for method in dir(self.ytmusic) if not method.startswith('_')]
+                lyrics_methods = [method for method in all_methods if 'lyric' in method.lower()]
+                print(f"All available methods: {all_methods}")
+                print(f"Lyrics-related methods: {lyrics_methods}")
+                
+                lyrics_data = None
+                
+                # Use the correct approach: get_watch_playlist to get lyrics ID, then get_lyrics
+                lyrics_data = None
+                
+                try:
+                    print("Getting watch playlist to find lyrics ID")
+                    watch_data = self.ytmusic.get_watch_playlist(video_id)
+                    print(f"Watch data keys: {watch_data.keys() if isinstance(watch_data, dict) else 'Not a dict'}")
+                    
+                    if isinstance(watch_data, dict) and 'lyrics' in watch_data:
+                        lyrics_id = watch_data['lyrics']
+                        print(f"Found lyrics ID: {lyrics_id}")
+                        
+                        if lyrics_id and isinstance(lyrics_id, str) and len(lyrics_id) > 5:
+                            print("Getting actual lyrics using lyrics ID")
+                            lyrics_data = self.ytmusic.get_lyrics(lyrics_id)
+                            print(f"Lyrics data: {lyrics_data}")
+                            print(f"Lyrics data type: {type(lyrics_data)}")
+                        else:
+                            print("Invalid lyrics ID")
+                    else:
+                        print("No lyrics ID found in watch playlist")
+                        
+                except Exception as e:
+                    print(f"Error getting lyrics: {e}")
+                    lyrics_data = None
+                
+                if lyrics_data:
+                    print("Processing lyrics data...")
+                    
+                    # Handle the standard ytmusicapi lyrics format
+                    if isinstance(lyrics_data, dict) and 'lyrics' in lyrics_data:
+                        lyrics_text = lyrics_data.get('lyrics', '')
+                        source = lyrics_data.get('source', '')
+                        
+                        print(f"Lyrics text length: {len(lyrics_text)}")
+                        print(f"Source: {source}")
+                        
+                        if lyrics_text and lyrics_text.strip():
+                            # Check if lyrics are in English
+                            if not is_english_text(lyrics_text):
+                                print(f"Non-English lyrics detected for video ID: {video_id}")
+                                self.send_json_response({
+                                    'lyrics': 'No lyrics available for this song',
+                                    'synchronized': [],
+                                    'hasLyrics': False
+                                })
+                                return
+                            
+                            print(f"English lyrics found for video ID: {video_id}")
+                            
+                            self.send_json_response({
+                                'lyrics': lyrics_text,
+                                'synchronized': [],
+                                'hasLyrics': True,
+                                'source': source
+                            })
+                            return
+                    
+                    # Handle TimedLyrics format (if available)
+                    elif hasattr(lyrics_data, 'hasTimestamps') and lyrics_data.get('hasTimestamps'):
+                        print("Processing TimedLyrics format")
+                        lyrics_lines = lyrics_data.get('lyrics', [])
+                        if lyrics_lines:
+                            synchronized_lyrics = []
+                            lyrics_text_lines = []
+                            
+                            for line in lyrics_lines:
+                                if hasattr(line, 'text') and hasattr(line, 'start_time') and hasattr(line, 'end_time'):
+                                    # Convert milliseconds to seconds
+                                    start_time = line.start_time / 1000.0
+                                    end_time = line.end_time / 1000.0
+                                    
+                                    synchronized_lyrics.append({
+                                        'text': line.text,
+                                        'startTime': start_time,
+                                        'endTime': end_time
+                                    })
+                                    lyrics_text_lines.append(line.text)
+                            
+                            lyrics_text = '\n'.join(lyrics_text_lines)
+                            
+                            if lyrics_text.strip():
+                                # Check if lyrics are in English
+                                if not is_english_text(lyrics_text):
+                                    print(f"Non-English TimedLyrics detected for video ID: {video_id}")
+                                    self.send_json_response({
+                                        'lyrics': 'No lyrics available for this song',
+                                        'synchronized': [],
+                                        'hasLyrics': False
+                                    })
+                                    return
+                                
+                                print(f"English TimedLyrics found for video ID: {video_id}")
+                                
+                                self.send_json_response({
+                                    'lyrics': lyrics_text,
+                                    'synchronized': [],
+                                    'hasLyrics': True
+                                })
+                                return
+                
+                # No lyrics found - return simple message
+                print(f"No real lyrics found for video ID: {video_id}")
+                
+                self.send_json_response({
+                    'lyrics': 'No lyrics available for this song',
+                    'synchronized': [],
+                    'hasLyrics': False
+                })
+                return
+                    
+            except Exception as e:
+                print(f"Lyrics error: {e}")
+                import traceback
+                traceback.print_exc()
+                # Fallback to no lyrics
+                self.send_json_response({
+                    'lyrics': f'Unable to load lyrics for this song. Error: {str(e)}',
+                    'synchronized': [],
+                    'hasLyrics': False
+                })
+        else:
+            # Demo mode - no lyrics available
+            self.send_json_response({
+                'lyrics': 'Lyrics not available in demo mode.',
+                'synchronized': [],
+                'hasLyrics': False
+            })
 
     def send_json_response(self, data: Dict[str, Any], status_code: int = 200) -> None:
         """Send JSON response with proper headers"""
