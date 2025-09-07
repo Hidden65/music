@@ -174,10 +174,10 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
         
         # Serve static files
         if path == '/':
-            self.path = '/static/index.html'
+            self.path = 'static/index.html'
         elif path.startswith('/static/'):
-            # Keep the path as is for static files
-            pass
+            # Remove leading slash for static files
+            self.path = path[1:]
         
         return super().do_GET()
 
@@ -675,6 +675,7 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
             print(f"Error removing song from playlist: {e}")
             self.send_json_response({'error': 'Internal server error'}, 500)
 
+    def send_json_response(self, data: Dict[str, Any], status_code: int = 200) -> None:
         """Send JSON response with proper headers"""
         payload = json.dumps(data, ensure_ascii=False, indent=2).encode('utf-8')
         
