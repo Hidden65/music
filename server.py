@@ -161,6 +161,9 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
         elif path == '/api/recommendations':
             self.handle_api_recommendations(parsed.query)
             return
+        elif path == '/api/lyrics':
+            self.handle_api_lyrics(parsed.query)
+            return
         elif path == '/api/user/liked':
             self.handle_api_user_liked(parsed.query)
             return
@@ -196,8 +199,6 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
             self.handle_api_playlist_add_song()
         elif path == '/api/playlist/remove-song':
             self.handle_api_playlist_remove_song()
-        elif path == '/api/audio':
-            self.handle_api_audio(parsed.query)
         else:
             self.send_error(404, "Not Found")
 
@@ -236,11 +237,11 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
         self.send_json_response({'results': results})
 
     def handle_api_search_multi(self, query_string: str) -> None:
-        """Return songs, albums, and artists for a query"""
+        """Return songs, albums, artists, playlists, and podcasts for a query"""
         params = urllib.parse.parse_qs(query_string or '')
         q_list = params.get('q', [''])
         q = (q_list[0] if q_list else '').strip()
-        out = {'songs': [], 'albums': [], 'artists': []}
+        out = {'songs': [], 'albums': [], 'artists': [], 'playlists': [], 'podcasts': []}
         if not q:
             self.send_json_response(out)
             return
@@ -267,6 +268,35 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
                     }
                     for ar in artists if ar
                 ]
+                # Playlists
+                try:
+                    playlists = self.ytmusic.search(q, filter='playlists', limit=15)
+                    out['playlists'] = [
+                        {
+                            'playlistId': p.get('browseId') or p.get('playlistId') or p.get('radioId') or p.get('videoId'),
+                            'title': p.get('title') or p.get('name'),
+                            'thumbnail': (p.get('thumbnails') or [{}])[-1].get('url') if p.get('thumbnails') else None,
+                            'count': p.get('count') or p.get('songCount')
+                        }
+                        for p in playlists if p
+                    ]
+                except Exception as e:
+                    print(f"playlists search error: {e}")
+                # Podcasts (YouTube Music has limited podcast support; as a best-effort, search videos)
+                try:
+                    videos = self.ytmusic.search(q + ' podcast', filter='videos', limit=10)
+                    out['podcasts'] = [
+                        {
+                            'videoId': v.get('videoId'),
+                            'title': v.get('title'),
+                            'channel': (v.get('artists') or [{}])[0].get('name') if v.get('artists') else None,
+                            'thumbnail': (v.get('thumbnails') or [{}])[-1].get('url') if v.get('thumbnails') else None,
+                            'duration': v.get('duration')
+                        }
+                        for v in videos if v and v.get('videoId')
+                    ]
+                except Exception as e:
+                    print(f"podcasts search error: {e}")
             except Exception as e:
                 print(f"search_multi error: {e}")
                 out = self._demo_search_multi(q)
@@ -339,8 +369,36 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
         return {
             'songs': [],
             'albums': [],
-            'artists': []
+            'artists': [],
+            'playlists': [],
+            'podcasts': []
         }
+
+    def handle_api_lyrics(self, query_string: str) -> None:
+        """Fetch lyrics for a given videoId if available"""
+        params = urllib.parse.parse_qs(query_string or '')
+        video_id = (params.get('videoId', [''])[0] or '').strip()
+        if not video_id:
+            self.send_json_response({'error': 'videoId required'}, 400)
+            return
+        lyrics_text: Optional[str] = None
+        source: Optional[str] = None
+        try:
+            if self.ytmusic:
+                # Get watch playlist to find lyrics browseId
+                wp = self.ytmusic.get_watch_playlist(video_id)
+                lyrics_browse_id = None
+                if isinstance(wp, dict):
+                    lyrics_data = wp.get('lyrics') or {}
+                    lyrics_browse_id = lyrics_data.get('browseId') or lyrics_data.get('browseIdStub')
+                if lyrics_browse_id:
+                    lyr = self.ytmusic.get_lyrics(lyrics_browse_id)
+                    if isinstance(lyr, dict):
+                        lyrics_text = lyr.get('lyrics')
+                        source = lyr.get('source')
+        except Exception as e:
+            print(f"lyrics error: {e}")
+        self.send_json_response({'lyrics': lyrics_text or '', 'source': source, 'synced': bool(lyrics_text and ('[' in lyrics_text and ']' in lyrics_text))})
 
     def handle_api_trending(self) -> None:
         """Handle trending music requests"""
@@ -675,36 +733,6 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
             
         except Exception as e:
             print(f"Error removing song from playlist: {e}")
-            self.send_json_response({'error': 'Internal server error'}, 500)
-
-    def handle_api_audio(self, query_string: str) -> None:
-        """Handle audio stream requests for background playback"""
-        params = urllib.parse.parse_qs(query_string or '')
-        video_id = params.get('videoId', [''])[0]
-        
-        if not video_id:
-            self.send_json_response({'error': 'Video ID required'}, 400)
-            return
-        
-        try:
-            # For now, return a placeholder audio URL
-            # In production, you'd integrate with yt-dlp or similar service
-            audio_url = f"https://www.youtube.com/watch?v={video_id}"
-            
-            # You could also use services like:
-            # - yt-dlp to extract audio
-            # - YouTube's audio-only streams (if available)
-            # - Third-party audio extraction services
-            
-            self.send_json_response({
-                'videoId': video_id,
-                'audioUrl': audio_url,
-                'format': 'audio/mp4',
-                'note': 'This is a placeholder. In production, integrate with yt-dlp or similar service.'
-            })
-            
-        except Exception as e:
-            print(f"Error getting audio stream: {e}")
             self.send_json_response({'error': 'Internal server error'}, 500)
 
     def send_json_response(self, data: Dict[str, Any], status_code: int = 200) -> None:
