@@ -171,6 +171,13 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
             playlist_id = path.split('/')[-1]
             self.handle_api_playlist(playlist_id)
             return
+        elif path == '/api/lyrics':
+            self.handle_api_lyrics(parsed.query)
+            return
+        elif path.startswith('/api/podcast/'):
+            podcast_id = path.split('/')[-1]
+            self.handle_api_podcast(podcast_id)
+            return
         
         # Serve static files
         if path == '/':
@@ -234,18 +241,21 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
         self.send_json_response({'results': results})
 
     def handle_api_search_multi(self, query_string: str) -> None:
-        """Return songs, albums, and artists for a query"""
+        """Return songs, albums, artists, playlists, and podcasts for a query"""
         params = urllib.parse.parse_qs(query_string or '')
         q_list = params.get('q', [''])
         q = (q_list[0] if q_list else '').strip()
-        out = {'songs': [], 'albums': [], 'artists': []}
+        out = {'songs': [], 'albums': [], 'artists': [], 'playlists': [], 'podcasts': []}
         if not q:
             self.send_json_response(out)
             return
         if self.ytmusic:
             try:
+                # Search songs
                 songs = self.ytmusic.search(q, filter='songs', limit=15)
                 out['songs'] = [map_song_result(s) for s in songs if s]
+                
+                # Search albums
                 albums = self.ytmusic.search(q, filter='albums', limit=15)
                 out['albums'] = [
                     {
@@ -256,6 +266,8 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
                     }
                     for a in albums if a
                 ]
+                
+                # Search artists
                 artists = self.ytmusic.search(q, filter='artists', limit=15)
                 out['artists'] = [
                     {
@@ -265,6 +277,33 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
                     }
                     for ar in artists if ar
                 ]
+                
+                # Search playlists
+                playlists = self.ytmusic.search(q, filter='playlists', limit=15)
+                out['playlists'] = [
+                    {
+                        'playlistId': p.get('browseId') or p.get('playlistId'),
+                        'title': p.get('title') or p.get('name'),
+                        'author': p.get('author') or p.get('artist'),
+                        'thumbnail': (p.get('thumbnails') or [{}])[-1].get('url') if p.get('thumbnails') else None,
+                        'songCount': p.get('songCount', 0)
+                    }
+                    for p in playlists if p
+                ]
+                
+                # Search podcasts (using community playlists as proxy)
+                podcasts = self.ytmusic.search(q, filter='community_playlists', limit=10)
+                out['podcasts'] = [
+                    {
+                        'podcastId': p.get('browseId') or p.get('playlistId'),
+                        'title': p.get('title') or p.get('name'),
+                        'author': p.get('author') or p.get('artist'),
+                        'thumbnail': (p.get('thumbnails') or [{}])[-1].get('url') if p.get('thumbnails') else None,
+                        'episodeCount': p.get('songCount', 0)
+                    }
+                    for p in podcasts if p and 'podcast' in (p.get('title', '').lower() or p.get('name', '').lower())
+                ]
+                
             except Exception as e:
                 print(f"search_multi error: {e}")
                 out = self._demo_search_multi(q)
@@ -337,7 +376,9 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
         return {
             'songs': [],
             'albums': [],
-            'artists': []
+            'artists': [],
+            'playlists': [],
+            'podcasts': []
         }
 
     def handle_api_trending(self) -> None:
@@ -674,6 +715,135 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
         except Exception as e:
             print(f"Error removing song from playlist: {e}")
             self.send_json_response({'error': 'Internal server error'}, 500)
+
+    def handle_api_lyrics(self, query_string: str) -> None:
+        """Handle lyrics requests for a song"""
+        params = urllib.parse.parse_qs(query_string or '')
+        video_id = params.get('videoId', [''])[0]
+        
+        if not video_id:
+            self.send_json_response({'error': 'Video ID required'}, 400)
+            return
+        
+        if self.ytmusic:
+            try:
+                # Get lyrics using ytmusicapi
+                lyrics = self.ytmusic.get_lyrics(video_id)
+                if lyrics and 'lyrics' in lyrics:
+                    # Parse lyrics with timestamps if available
+                    lyrics_text = lyrics['lyrics']
+                    lyrics_data = {
+                        'videoId': video_id,
+                        'lyrics': lyrics_text,
+                        'hasTimestamps': False,
+                        'syncedLyrics': []
+                    }
+                    
+                    # Try to parse synced lyrics if available
+                    if isinstance(lyrics_text, str) and '[' in lyrics_text and ']' in lyrics_text:
+                        lyrics_data['hasTimestamps'] = True
+                        lyrics_data['syncedLyrics'] = self._parse_synced_lyrics(lyrics_text)
+                    
+                    self.send_json_response({'lyrics': lyrics_data})
+                else:
+                    self.send_json_response({'lyrics': {
+                        'videoId': video_id,
+                        'lyrics': 'No lyrics available',
+                        'hasTimestamps': False,
+                        'syncedLyrics': []
+                    }})
+            except Exception as e:
+                print(f"Lyrics error: {e}")
+                self.send_json_response({'lyrics': {
+                    'videoId': video_id,
+                    'lyrics': 'No lyrics available',
+                    'hasTimestamps': False,
+                    'syncedLyrics': []
+                }})
+        else:
+            self.send_json_response({'lyrics': {
+                'videoId': video_id,
+                'lyrics': 'No lyrics available',
+                'hasTimestamps': False,
+                'syncedLyrics': []
+            }})
+
+    def handle_api_podcast(self, podcast_id: str) -> None:
+        """Handle podcast data requests"""
+        if not podcast_id:
+            self.send_json_response({'error': 'Podcast ID required'}, 400)
+            return
+        
+        if self.ytmusic:
+            try:
+                # Get playlist data (podcasts are treated as playlists)
+                playlist = self.ytmusic.get_playlist(podcast_id)
+                if playlist and 'tracks' in playlist:
+                    episodes = [map_song_result(track) for track in playlist['tracks']]
+                    podcast_data = {
+                        'podcastId': podcast_id,
+                        'title': playlist.get('title', 'Unknown Podcast'),
+                        'author': playlist.get('author', 'Unknown Author'),
+                        'thumbnail': ((playlist.get('thumbnails') or [{}])[-1]).get('url') if playlist.get('thumbnails') else None,
+                        'episodes': episodes
+                    }
+                    self.send_json_response({'podcast': podcast_data})
+                else:
+                    self.send_json_response({'podcast': {
+                        'podcastId': podcast_id,
+                        'title': 'Podcast Unavailable',
+                        'author': 'Unknown Author',
+                        'thumbnail': None,
+                        'episodes': []
+                    }})
+            except Exception as e:
+                print(f"Podcast error: {e}")
+                self.send_json_response({'podcast': {
+                    'podcastId': podcast_id,
+                    'title': 'Podcast Unavailable',
+                    'author': 'Unknown Author',
+                    'thumbnail': None,
+                    'episodes': []
+                }})
+        else:
+            self.send_json_response({'podcast': {
+                'podcastId': podcast_id,
+                'title': 'Podcast Unavailable',
+                'author': 'Unknown Author',
+                'thumbnail': None,
+                'episodes': []
+            }})
+
+    def _parse_synced_lyrics(self, lyrics_text: str) -> List[Dict[str, Any]]:
+        """Parse synced lyrics with timestamps"""
+        synced_lyrics = []
+        lines = lyrics_text.split('\n')
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+                
+            # Look for timestamp pattern [mm:ss.xxx]
+            import re
+            timestamp_match = re.match(r'\[(\d{2}):(\d{2})\.(\d{2,3})\]', line)
+            if timestamp_match:
+                minutes = int(timestamp_match.group(1))
+                seconds = int(timestamp_match.group(2))
+                milliseconds = int(timestamp_match.group(3))
+                
+                # Convert to total seconds
+                total_seconds = minutes * 60 + seconds + milliseconds / 1000.0
+                
+                # Extract lyrics text after timestamp
+                lyrics_line = line[timestamp_match.end():].strip()
+                if lyrics_line:
+                    synced_lyrics.append({
+                        'time': total_seconds,
+                        'text': lyrics_line
+                    })
+        
+        return synced_lyrics
 
     def send_json_response(self, data: Dict[str, Any], status_code: int = 200) -> None:
         """Send JSON response with proper headers"""
