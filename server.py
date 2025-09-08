@@ -995,18 +995,7 @@ Y hacer de tu cuerpo todo un manuscrito''',
                         print(f"Source: {source}")
                         
                         if lyrics_text and lyrics_text.strip():
-                            # Check if lyrics are in English
-                            if not is_english_text(lyrics_text):
-                                print(f"Non-English lyrics detected for video ID: {video_id}")
-                                self.send_json_response({
-                                    'lyrics': 'No lyrics available for this song',
-                                    'synchronized': [],
-                                    'hasLyrics': False
-                                })
-                                return
-                            
-                            print(f"English lyrics found for video ID: {video_id}")
-                            
+                            # Accept lyrics in any language; do not filter by English only
                             self.send_json_response({
                                 'lyrics': lyrics_text,
                                 'synchronized': [],
@@ -1039,18 +1028,7 @@ Y hacer de tu cuerpo todo un manuscrito''',
                             lyrics_text = '\n'.join(lyrics_text_lines)
                             
                             if lyrics_text.strip():
-                                # Check if lyrics are in English
-                                if not is_english_text(lyrics_text):
-                                    print(f"Non-English TimedLyrics detected for video ID: {video_id}")
-                                    self.send_json_response({
-                                        'lyrics': 'No lyrics available for this song',
-                                        'synchronized': [],
-                                        'hasLyrics': False
-                                    })
-                                    return
-                                
-                                print(f"English TimedLyrics found for video ID: {video_id}")
-                                
+                                # Accept lyrics in any language for timed lyrics as well
                                 self.send_json_response({
                                     'lyrics': lyrics_text,
                                     'synchronized': [],
