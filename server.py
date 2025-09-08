@@ -192,12 +192,26 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
         
         # Serve static files
         if path == '/':
+            # Serve the main HTML file
             self.path = 'static/index.html'
         elif path.startswith('/static/'):
             # Remove leading slash for static files
             self.path = path[1:]
+        else:
+            # For any other path, try to serve it as a static file
+            # This handles cases like /favicon.ico, /robots.txt, etc.
+            if not path.startswith('/'):
+                path = '/' + path
+            self.path = path[1:]  # Remove leading slash
         
-        return super().do_GET()
+        try:
+            return super().do_GET()
+        except FileNotFoundError:
+            # If file not found, serve the main HTML file (for SPA routing)
+            self.path = 'static/index.html'
+            return super().do_GET()
+  
+
 
     def do_POST(self):  # noqa: N802 (keep stdlib naming)
         parsed = urllib.parse.urlsplit(self.path)
