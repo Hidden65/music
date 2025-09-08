@@ -794,6 +794,8 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
         """Handle lyrics requests for songs"""
         params = urllib.parse.parse_qs(query_string or '')
         video_id = params.get('videoId', [''])[0]
+        title_param = (params.get('title', [''])[0] or '').strip()
+        artist_param = (params.get('artist', [''])[0] or '').strip()
         
         if not video_id:
             self.send_json_response({'error': 'Video ID required'}, 400)
@@ -1063,7 +1065,58 @@ Y hacer de tu cuerpo todo un manuscrito''',
                 
                 # No lyrics found - return simple message
                 print(f"No real lyrics found for video ID: {video_id}")
-                
+
+                # Fallback: Try a public lyrics API using title/artist
+                try:
+                    song_title = title_param
+                    song_artist = artist_param
+                    if (not song_title or not song_artist) and self.ytmusic:
+                        try:
+                            meta = self.ytmusic.get_song(video_id)
+                            # Attempt to extract from videoDetails or microformat
+                            if isinstance(meta, dict):
+                                song_title = song_title or (
+                                    (meta.get('videoDetails') or {}).get('title') or
+                                    meta.get('title') or ''
+                                )
+                                song_artist = song_artist or (
+                                    (meta.get('videoDetails') or {}).get('author') or
+                                    (meta.get('artists') or [{}])[0].get('name') if meta.get('artists') else ''
+                                )
+                        except Exception as _:
+                            pass
+
+                    if song_title and song_artist:
+                        import urllib.request
+                        import urllib.error
+                        query_url = f"https://api.lyrics.ovh/v1/{urllib.parse.quote(song_artist)}/{urllib.parse.quote(song_title)}"
+                        print(f"Fallback lyrics.ovh query: {query_url}")
+                        try:
+                            req = urllib.request.Request(query_url, headers={'User-Agent': 'Mozilla/5.0'})
+                            with urllib.request.urlopen(req, timeout=7) as resp:
+                                if resp.status == 200:
+                                    raw = resp.read()
+                                    try:
+                                        payload = json.loads(raw.decode('utf-8'))
+                                    except Exception:
+                                        payload = {}
+                                    fallback_lyrics = (payload.get('lyrics') or '').strip()
+                                    if fallback_lyrics:
+                                        self.send_json_response({
+                                            'lyrics': fallback_lyrics,
+                                            'synchronized': [],
+                                            'hasLyrics': True,
+                                            'source': 'lyrics.ovh'
+                                        })
+                                        return
+                        except urllib.error.URLError as _:
+                            pass
+                        except Exception as _:
+                            pass
+
+                except Exception as _:
+                    pass
+
                 self.send_json_response({
                     'lyrics': 'No lyrics available for this song',
                     'synchronized': [],
