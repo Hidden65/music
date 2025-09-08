@@ -965,19 +965,38 @@ Y hacer de tu cuerpo todo un manuscrito''',
                     watch_data = self.ytmusic.get_watch_playlist(video_id)
                     print(f"Watch data keys: {watch_data.keys() if isinstance(watch_data, dict) else 'Not a dict'}")
                     
+                    lyrics_id = None
                     if isinstance(watch_data, dict) and 'lyrics' in watch_data:
-                        lyrics_id = watch_data['lyrics']
+                        possible_lyrics = watch_data['lyrics']
+                        # Handle both direct string and nested object forms
+                        if isinstance(possible_lyrics, str):
+                            lyrics_id = possible_lyrics
+                        elif isinstance(possible_lyrics, dict):
+                            lyrics_id = possible_lyrics.get('browseId') or possible_lyrics.get('browse_id') or possible_lyrics.get('id')
+                    
+                    if lyrics_id and isinstance(lyrics_id, str) and len(lyrics_id) > 5:
                         print(f"Found lyrics ID: {lyrics_id}")
-                        
-                        if lyrics_id and isinstance(lyrics_id, str) and len(lyrics_id) > 5:
-                            print("Getting actual lyrics using lyrics ID")
-                            lyrics_data = self.ytmusic.get_lyrics(lyrics_id)
-                            print(f"Lyrics data: {lyrics_data}")
-                            print(f"Lyrics data type: {type(lyrics_data)}")
-                        else:
-                            print("Invalid lyrics ID")
+                        print("Getting actual lyrics using lyrics ID")
+                        lyrics_data = self.ytmusic.get_lyrics(lyrics_id)
+                        print(f"Lyrics data: {lyrics_data}")
+                        print(f"Lyrics data type: {type(lyrics_data)}")
                     else:
-                        print("No lyrics ID found in watch playlist")
+                        print("No valid lyrics ID found in watch playlist; attempting fallback")
+                        # Fallback: try get_song to discover lyrics browseId if available
+                        try:
+                            song_meta = self.ytmusic.get_song(video_id)
+                            if isinstance(song_meta, dict):
+                                # Some versions expose lyrics browse id at song_meta['lyrics'] or nested
+                                possible = song_meta.get('lyrics')
+                                if isinstance(possible, str):
+                                    lyrics_id = possible
+                                elif isinstance(possible, dict):
+                                    lyrics_id = possible.get('browseId') or possible.get('browse_id') or possible.get('id')
+                                if lyrics_id and isinstance(lyrics_id, str) and len(lyrics_id) > 5:
+                                    print(f"Fallback found lyrics ID: {lyrics_id}")
+                                    lyrics_data = self.ytmusic.get_lyrics(lyrics_id)
+                        except Exception as inner_e:
+                            print(f"Fallback get_song error: {inner_e}")
                         
                 except Exception as e:
                     print(f"Error getting lyrics: {e}")
@@ -987,8 +1006,14 @@ Y hacer de tu cuerpo todo un manuscrito''',
                     print("Processing lyrics data...")
                     
                     # Handle the standard ytmusicapi lyrics format
-                    if isinstance(lyrics_data, dict) and 'lyrics' in lyrics_data:
-                        lyrics_text = lyrics_data.get('lyrics', '')
+                    if isinstance(lyrics_data, dict):
+                        # Normalize various possible keys from ytmusicapi versions
+                        lyrics_text = (
+                            lyrics_data.get('lyrics') or
+                            lyrics_data.get('text') or
+                            lyrics_data.get('content') or
+                            ''
+                        )
                         source = lyrics_data.get('source', '')
                         
                         print(f"Lyrics text length: {len(lyrics_text)}")
