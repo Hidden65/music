@@ -153,27 +153,6 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
             
         super().__init__(*args, directory=ROOT_DIR, **kwargs)
 
-    def _serve_file(self, relative_path: str, status_code: int = 200) -> None:
-        """Serve a file relative to ROOT_DIR with proper headers."""
-        try:
-            full_path = os.path.join(ROOT_DIR, relative_path)
-            if not os.path.isfile(full_path):
-                self.send_error(404, "File not found")
-                return
-
-            ctype = self.guess_type(full_path)
-            with open(full_path, 'rb') as f:
-                fs = os.fstat(f.fileno())
-                self.send_response(status_code)
-                self.send_header('Content-Type', ctype)
-                self.send_header('Content-Length', str(fs.st_size))
-                self.send_header('Cache-Control', 'no-cache')
-                self.end_headers()
-                self.wfile.write(f.read())
-        except Exception as e:
-            print(f"Error serving file {relative_path}: {e}")
-            self.send_error(500, "Internal server error")
-
     def do_GET(self):  # noqa: N802 (keep stdlib naming)
         parsed = urllib.parse.urlsplit(self.path)
         path = parsed.path
@@ -211,24 +190,26 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
             self.handle_api_lyrics(parsed.query)
             return
         
-        # Serve static files and SPA fallback
+        # Serve static files
         if path == '/':
-            # Serve the main HTML file directly to avoid 404 from base handler
-            return self._serve_file('static/index.html')
+            # Serve the main HTML file
+            self.path = 'static/index.html'
+        elif path.startswith('/static/'):
+            # Remove leading slash for static files
+            self.path = path[1:]
+        else:
+            # For any other path, try to serve it as a static file
+            # This handles cases like /favicon.ico, /robots.txt, etc.
+            if not path.startswith('/'):
+                path = '/' + path
+            self.path = path[1:]  # Remove leading slash
         
-        if path.startswith('/static/'):
-            # Serve files under /static directly
-            rel_path = path.lstrip('/')
-            return self._serve_file(rel_path)
-        
-        # Try to serve other root-level files (e.g., /favicon.ico)
-        candidate = path.lstrip('/') or 'static/index.html'
-        candidate_full = os.path.join(ROOT_DIR, candidate)
-        if os.path.isfile(candidate_full):
-            return self._serve_file(candidate)
-        
-        # SPA fallback: serve index.html for unknown routes
-        return self._serve_file('static/index.html')
+        try:
+            return super().do_GET()
+        except FileNotFoundError:
+            # If file not found, serve the main HTML file (for SPA routing)
+            self.path = 'static/index.html'
+            return super().do_GET()
   
 
 
