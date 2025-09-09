@@ -794,8 +794,6 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
         """Handle lyrics requests for songs"""
         params = urllib.parse.parse_qs(query_string or '')
         video_id = params.get('videoId', [''])[0]
-        title_param = (params.get('title', [''])[0] or '').strip()
-        artist_param = (params.get('artist', [''])[0] or '').strip()
         
         if not video_id:
             self.send_json_response({'error': 'Video ID required'}, 400)
@@ -967,38 +965,19 @@ Y hacer de tu cuerpo todo un manuscrito''',
                     watch_data = self.ytmusic.get_watch_playlist(video_id)
                     print(f"Watch data keys: {watch_data.keys() if isinstance(watch_data, dict) else 'Not a dict'}")
                     
-                    lyrics_id = None
                     if isinstance(watch_data, dict) and 'lyrics' in watch_data:
-                        possible_lyrics = watch_data['lyrics']
-                        # Handle both direct string and nested object forms
-                        if isinstance(possible_lyrics, str):
-                            lyrics_id = possible_lyrics
-                        elif isinstance(possible_lyrics, dict):
-                            lyrics_id = possible_lyrics.get('browseId') or possible_lyrics.get('browse_id') or possible_lyrics.get('id')
-                    
-                    if lyrics_id and isinstance(lyrics_id, str) and len(lyrics_id) > 5:
+                        lyrics_id = watch_data['lyrics']
                         print(f"Found lyrics ID: {lyrics_id}")
-                        print("Getting actual lyrics using lyrics ID")
-                        lyrics_data = self.ytmusic.get_lyrics(lyrics_id)
-                        print(f"Lyrics data: {lyrics_data}")
-                        print(f"Lyrics data type: {type(lyrics_data)}")
+                        
+                        if lyrics_id and isinstance(lyrics_id, str) and len(lyrics_id) > 5:
+                            print("Getting actual lyrics using lyrics ID")
+                            lyrics_data = self.ytmusic.get_lyrics(lyrics_id)
+                            print(f"Lyrics data: {lyrics_data}")
+                            print(f"Lyrics data type: {type(lyrics_data)}")
+                        else:
+                            print("Invalid lyrics ID")
                     else:
-                        print("No valid lyrics ID found in watch playlist; attempting fallback")
-                        # Fallback: try get_song to discover lyrics browseId if available
-                        try:
-                            song_meta = self.ytmusic.get_song(video_id)
-                            if isinstance(song_meta, dict):
-                                # Some versions expose lyrics browse id at song_meta['lyrics'] or nested
-                                possible = song_meta.get('lyrics')
-                                if isinstance(possible, str):
-                                    lyrics_id = possible
-                                elif isinstance(possible, dict):
-                                    lyrics_id = possible.get('browseId') or possible.get('browse_id') or possible.get('id')
-                                if lyrics_id and isinstance(lyrics_id, str) and len(lyrics_id) > 5:
-                                    print(f"Fallback found lyrics ID: {lyrics_id}")
-                                    lyrics_data = self.ytmusic.get_lyrics(lyrics_id)
-                        except Exception as inner_e:
-                            print(f"Fallback get_song error: {inner_e}")
+                        print("No lyrics ID found in watch playlist")
                         
                 except Exception as e:
                     print(f"Error getting lyrics: {e}")
@@ -1008,14 +987,8 @@ Y hacer de tu cuerpo todo un manuscrito''',
                     print("Processing lyrics data...")
                     
                     # Handle the standard ytmusicapi lyrics format
-                    if isinstance(lyrics_data, dict):
-                        # Normalize various possible keys from ytmusicapi versions
-                        lyrics_text = (
-                            lyrics_data.get('lyrics') or
-                            lyrics_data.get('text') or
-                            lyrics_data.get('content') or
-                            ''
-                        )
+                    if isinstance(lyrics_data, dict) and 'lyrics' in lyrics_data:
+                        lyrics_text = lyrics_data.get('lyrics', '')
                         source = lyrics_data.get('source', '')
                         
                         print(f"Lyrics text length: {len(lyrics_text)}")
@@ -1065,58 +1038,7 @@ Y hacer de tu cuerpo todo un manuscrito''',
                 
                 # No lyrics found - return simple message
                 print(f"No real lyrics found for video ID: {video_id}")
-
-                # Fallback: Try a public lyrics API using title/artist
-                try:
-                    song_title = title_param
-                    song_artist = artist_param
-                    if (not song_title or not song_artist) and self.ytmusic:
-                        try:
-                            meta = self.ytmusic.get_song(video_id)
-                            # Attempt to extract from videoDetails or microformat
-                            if isinstance(meta, dict):
-                                song_title = song_title or (
-                                    (meta.get('videoDetails') or {}).get('title') or
-                                    meta.get('title') or ''
-                                )
-                                song_artist = song_artist or (
-                                    (meta.get('videoDetails') or {}).get('author') or
-                                    (meta.get('artists') or [{}])[0].get('name') if meta.get('artists') else ''
-                                )
-                        except Exception as _:
-                            pass
-
-                    if song_title and song_artist:
-                        import urllib.request
-                        import urllib.error
-                        query_url = f"https://api.lyrics.ovh/v1/{urllib.parse.quote(song_artist)}/{urllib.parse.quote(song_title)}"
-                        print(f"Fallback lyrics.ovh query: {query_url}")
-                        try:
-                            req = urllib.request.Request(query_url, headers={'User-Agent': 'Mozilla/5.0'})
-                            with urllib.request.urlopen(req, timeout=7) as resp:
-                                if resp.status == 200:
-                                    raw = resp.read()
-                                    try:
-                                        payload = json.loads(raw.decode('utf-8'))
-                                    except Exception:
-                                        payload = {}
-                                    fallback_lyrics = (payload.get('lyrics') or '').strip()
-                                    if fallback_lyrics:
-                                        self.send_json_response({
-                                            'lyrics': fallback_lyrics,
-                                            'synchronized': [],
-                                            'hasLyrics': True,
-                                            'source': 'lyrics.ovh'
-                                        })
-                                        return
-                        except urllib.error.URLError as _:
-                            pass
-                        except Exception as _:
-                            pass
-
-                except Exception as _:
-                    pass
-
+                
                 self.send_json_response({
                     'lyrics': 'No lyrics available for this song',
                     'synchronized': [],
