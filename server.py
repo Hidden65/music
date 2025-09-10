@@ -7,6 +7,8 @@ from http.server import SimpleHTTPRequestHandler
 from socketserver import ThreadingTCPServer
 import time
 import sqlite3
+import urllib.request
+import urllib.error
 
 try:
     from ytmusicapi import YTMusic
@@ -130,6 +132,24 @@ def map_song_result(item: Dict[str, Any]) -> Dict[str, Any]:
         'duration': duration,
         'thumbnail': thumb_url
     }
+
+def fetch_remote_json(path_with_query: str) -> Optional[Dict[str, Any]]:
+    """Fetch JSON from hosted backend as a fallback when local YTMusic is unavailable."""
+    base = 'https://music-h3vv.onrender.com'
+    url = base + path_with_query
+    try:
+        req = urllib.request.Request(url, headers={'Accept': 'application/json'})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            if resp.getcode() == 200:
+                data = json.loads(resp.read().decode('utf-8'))
+                return data
+    except urllib.error.HTTPError as e:
+        print(f"Remote fetch HTTP error for {url}: {e}")
+    except urllib.error.URLError as e:
+        print(f"Remote fetch URL error for {url}: {e}")
+    except Exception as e:
+        print(f"Remote fetch error for {url}: {e}")
+    return None
 
 def get_demo_results(query: str) -> List[Dict[str, Any]]:
     """Return empty results when YTMusic is not available"""
@@ -256,9 +276,19 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
                         
                 except Exception as e:
                     print(f"Search error: {e}")
-                    results = get_demo_results(q)
+                    # Fallback to hosted backend
+                    remote = fetch_remote_json('/api/search?' + (query_string or ''))
+                    if remote and isinstance(remote.get('results'), list):
+                        results = [r for r in remote['results'] if r.get('videoId')]
+                    else:
+                        results = get_demo_results(q)
             else:
-                results = get_demo_results(q)
+                # No local API; try hosted backend
+                remote = fetch_remote_json('/api/search?' + (query_string or ''))
+                if remote and isinstance(remote.get('results'), list):
+                    results = [r for r in remote['results'] if r.get('videoId')]
+                else:
+                    results = get_demo_results(q)
         
         # Filter out results without video IDs
         results = [r for r in results if r.get('videoId')][:20]
@@ -417,19 +447,19 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
 
     def handle_api_trending(self) -> None:
         """Handle trending music requests"""
+        results: List[Dict[str, Any]] = []
         if self.ytmusic:
             try:
-                # Get trending music
                 trending = self.ytmusic.get_charts()
                 if trending and 'songs' in trending:
                     results = [map_song_result(song) for song in trending['songs'][:20]]
-                else:
-                    results = []
             except Exception as e:
                 print(f"Trending error: {e}")
-                results = []
-        else:
-            results = []
+        # If empty, try hosted backend
+        if not results:
+            remote = fetch_remote_json('/api/trending')
+            if remote and isinstance(remote.get('results'), list):
+                results = [r for r in remote['results'] if r.get('videoId')]
         
         self.send_json_response({'results': results})
 
