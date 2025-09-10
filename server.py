@@ -19,6 +19,8 @@ except ImportError:
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(ROOT_DIR, 'wave_music.db')
+# Optional: external backend for fallback (disabled by default)
+REMOTE_BASE_URL = os.environ.get('REMOTE_BASE_URL')
 
 def init_database():
     """Initialize SQLite database for storing user data (fallback if Firebase not available)"""
@@ -134,21 +136,32 @@ def map_song_result(item: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 def fetch_remote_json(path_with_query: str) -> Optional[Dict[str, Any]]:
-    """Fetch JSON from hosted backend as a fallback when local YTMusic is unavailable."""
-    base = 'https://music-h3vv.onrender.com'
-    url = base + path_with_query
+    """Fetch JSON from external backend as a fallback when local YTMusic is unavailable.
+
+    Disabled unless REMOTE_BASE_URL is set. Times out quickly and fails quietly.
+    """
+    if not REMOTE_BASE_URL:
+        return None
+    url = REMOTE_BASE_URL.rstrip('/') + path_with_query
     try:
-        req = urllib.request.Request(url, headers={'Accept': 'application/json'})
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        req = urllib.request.Request(
+            url,
+            headers={
+                'Accept': 'application/json',
+                'User-Agent': 'WaveMusicServer/1.0'
+            }
+        )
+        with urllib.request.urlopen(req, timeout=4) as resp:
             if resp.getcode() == 200:
                 data = json.loads(resp.read().decode('utf-8'))
                 return data
     except urllib.error.HTTPError as e:
-        print(f"Remote fetch HTTP error for {url}: {e}")
+        # Quietly ignore remote fallback errors
+        pass
     except urllib.error.URLError as e:
-        print(f"Remote fetch URL error for {url}: {e}")
+        pass
     except Exception as e:
-        print(f"Remote fetch error for {url}: {e}")
+        pass
     return None
 
 def get_demo_results(query: str) -> List[Dict[str, Any]]:
