@@ -17,6 +17,13 @@ except ImportError:
     YTMUSIC_AVAILABLE = False
     print("Warning: ytmusicapi not installed. Using demo mode.")
 
+# Optional: yt-dlp for direct audio extraction
+try:
+    import yt_dlp  # type: ignore
+    YTDLP_AVAILABLE = True
+except Exception:
+    YTDLP_AVAILABLE = False
+
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(ROOT_DIR, 'wave_music.db')
 # Optional: external backend for fallback (disabled by default)
@@ -221,6 +228,9 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
             return
         elif path == '/api/lyrics':
             self.handle_api_lyrics(parsed.query)
+            return
+        elif path == '/api/audio':
+            self.handle_api_audio(parsed.query)
             return
         
         # Serve static files
@@ -1106,6 +1116,52 @@ Y hacer de tu cuerpo todo un manuscrito''',
                 'synchronized': [],
                 'hasLyrics': False
             })
+
+    def handle_api_audio(self, query_string: str) -> None:
+        """Return a direct audio URL for a given YouTube video ID using yt-dlp."""
+        params = urllib.parse.parse_qs(query_string or '')
+        video_id = (params.get('videoId', [''])[0] or '').strip()
+        if not video_id:
+            self.send_json_response({'error': 'Video ID required'}, 400)
+            return
+
+        if not YTDLP_AVAILABLE:
+            self.send_json_response({'error': 'yt-dlp not available on server'}, 501)
+            return
+
+        url = f"https://www.youtube.com/watch?v={video_id}"
+        ydl_opts = {
+            'quiet': True,
+            'skip_download': True,
+            'nocheckcertificate': True,
+            'format': 'bestaudio/best',
+            'noplaylist': True,
+            'no_warnings': True,
+            'default_search': 'ytsearch',
+            'cachedir': False,
+        }
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                # Find best audio format URL
+                stream_url = None
+                if 'url' in info:
+                    stream_url = info['url']
+                else:
+                    formats = info.get('formats') or []
+                    # Prefer audio-only formats
+                    audio_formats = [f for f in formats if (f.get('acodec') != 'none' and f.get('vcodec') == 'none')]
+                    preferred = audio_formats[-1] if audio_formats else (formats[-1] if formats else None)
+                    if preferred and preferred.get('url'):
+                        stream_url = preferred['url']
+                if not stream_url:
+                    self.send_json_response({'error': 'Unable to get audio stream'}, 502)
+                    return
+                # Return signed URL directly to the client
+                self.send_json_response({'audioUrl': stream_url})
+        except Exception as e:
+            print(f"yt-dlp error for {video_id}: {e}")
+            self.send_json_response({'error': 'Failed to fetch audio stream'}, 500)
 
     def send_json_response(self, data: Dict[str, Any], status_code: int = 200) -> None:
         """Send JSON response with proper headers. Ignore client-abort errors."""
