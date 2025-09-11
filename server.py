@@ -9,6 +9,7 @@ import time
 import sqlite3
 import urllib.request
 import urllib.error
+import re
 
 try:
     from ytmusicapi import YTMusic
@@ -221,6 +222,9 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
             return
         elif path == '/api/lyrics':
             self.handle_api_lyrics(parsed.query)
+            return
+        elif path == '/api/stream':
+            self.handle_api_stream(parsed.query)
             return
         
         # Serve static files
@@ -496,6 +500,71 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
             results = []
         
         self.send_json_response({'results': results})
+
+    def handle_api_stream(self, query_string: str) -> None:
+        """Return a direct audio URL for a given YouTube video ID using yt-dlp.
+
+        Response: { url: string, itag?: number, mime?: string, bitrate?: number }
+        """
+        params = urllib.parse.parse_qs(query_string or '')
+        video_id = (params.get('videoId', [''])[0] or '').strip()
+        if not video_id:
+            self.send_json_response({'error': 'Video ID required'}, 400)
+            return
+
+        try:
+            try:
+                import yt_dlp  # type: ignore
+            except Exception:
+                self.send_json_response({'error': 'yt-dlp not installed on server'}, 500)
+                return
+
+            # Prefer m4a/aac or webm/opus audio-only formats
+            ydl_opts = {
+                'format': 'bestaudio/best',
+                'quiet': True,
+                'no_warnings': True,
+                'skip_download': True,
+                'extract_flat': False,
+            }
+
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(f'https://www.youtube.com/watch?v={video_id}', download=False)
+                url = None
+                chosen = None
+                formats = info.get('formats') or []
+                # Rank audio formats: m4a > webm opus > others
+                def score(fmt: dict) -> int:
+                    mime = fmt.get('ext') or ''
+                    acodec = (fmt.get('acodec') or '').lower()
+                    vcodec = (fmt.get('vcodec') or '').lower()
+                    if vcodec and vcodec != 'none':
+                        return -100
+                    if mime == 'm4a' or 'aac' in acodec:
+                        return 3
+                    if mime == 'webm' or 'opus' in acodec:
+                        return 2
+                    return 1
+                best = None
+                best_score = -999
+                for f in formats:
+                    s = score(f)
+                    if s > best_score and f.get('url'):
+                        best = f
+                        best_score = s
+                chosen = best or (info.get('url') and info)
+                url = (chosen.get('url') if isinstance(chosen, dict) else None)
+                if not url:
+                    self.send_json_response({'error': 'No audio stream available'}, 404)
+                    return
+
+                mime = chosen.get('mime_type') or chosen.get('ext')
+                abr = chosen.get('abr') or chosen.get('tbr')
+                itag = chosen.get('format_id')
+                self.send_json_response({'url': url, 'mime': mime, 'bitrate': abr, 'itag': itag})
+        except Exception as e:
+            print(f"Stream error: {e}")
+            self.send_json_response({'error': 'Internal server error'}, 500)
 
     def handle_api_user_liked(self, query_string: str) -> None:
         """Handle user's liked songs"""
