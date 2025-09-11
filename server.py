@@ -10,13 +10,6 @@ import sqlite3
 import urllib.request
 import urllib.error
 
-# Optional: yt-dlp for extracting audio stream URLs
-try:
-    import yt_dlp  # type: ignore
-    YTDLP_AVAILABLE = True
-except Exception:
-    YTDLP_AVAILABLE = False
-
 try:
     from ytmusicapi import YTMusic
     YTMUSIC_AVAILABLE = True
@@ -228,9 +221,6 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
             return
         elif path == '/api/lyrics':
             self.handle_api_lyrics(parsed.query)
-            return
-        elif path == '/api/stream':
-            self.handle_api_stream(parsed.query)
             return
         
         # Serve static files
@@ -1143,58 +1133,6 @@ Y hacer de tu cuerpo todo un manuscrito''',
             self.end_headers()
         except (BrokenPipeError, ConnectionResetError):
             return
-
-    def handle_api_stream(self, query_string: str) -> None:
-        """Return a direct audio stream URL for a YouTube video using yt-dlp."""
-        params = urllib.parse.parse_qs(query_string or '')
-        video_id = (params.get('videoId', [''])[0] or '').strip()
-        if not video_id:
-            self.send_json_response({'error': 'Video ID required'}, 400)
-            return
-
-        if not YTDLP_AVAILABLE:
-            self.send_json_response({'error': 'yt-dlp not available on server'}, 501)
-            return
-
-        video_url = f"https://www.youtube.com/watch?v={video_id}"
-        ydl_opts = {
-            'format': 'bestaudio/best',
-            'quiet': True,
-            'noplaylist': True,
-            'skip_download': True,
-        }
-
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(video_url, download=False)
-                # Prefer audio-only formats
-                stream_url = None
-                if 'url' in info:
-                    stream_url = info['url']
-                else:
-                    formats = info.get('formats') or []
-                    # Try high-quality audio-only first
-                    audio_formats = [
-                        f for f in formats
-                        if (f.get('vcodec') in (None, 'none')) and f.get('acodec') not in (None, 'none') and f.get('url')
-                    ]
-                    # Sort by abr descending as quality heuristic
-                    audio_formats.sort(key=lambda f: (f.get('abr') or 0), reverse=True)
-                    if audio_formats:
-                        stream_url = audio_formats[0]['url']
-                    elif formats:
-                        stream_url = formats[-1].get('url')
-
-                if not stream_url:
-                    self.send_json_response({'error': 'Unable to resolve stream URL'}, 502)
-                    return
-
-                # Return direct URL; media elements can fetch cross-origin
-                self.send_json_response({'url': stream_url})
-                return
-        except Exception as e:
-            print(f"yt-dlp error for {video_id}: {e}")
-            self.send_json_response({'error': 'Stream extraction failed'}, 500)
 
 if __name__ == '__main__':
     # Initialize database
