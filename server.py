@@ -20,8 +20,42 @@ except ImportError:
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(ROOT_DIR, 'wave_music.db')
+COOKIES_PATH = os.path.join(ROOT_DIR, 'youtube_cookies.txt')
 # Optional: external backend for fallback (disabled by default)
 REMOTE_BASE_URL = os.environ.get('REMOTE_BASE_URL')
+
+def get_ytdl_opts(quality: str = 'high') -> dict:
+    """Get yt-dlp options with proper cookie handling and bot detection avoidance"""
+    quality_map = {
+        'high': 'bestaudio/best',
+        'medium': 'bestaudio[abr<=160]/bestaudio/best',
+        'low': 'bestaudio[abr<=96]/bestaudio[abr<=128]/bestaudio/best',
+    }
+    
+    opts = {
+        'format': quality_map.get(quality, 'bestaudio/best'),
+        'quiet': True,
+        'no_warnings': True,
+        'skip_download': True,
+        'extract_flat': False,
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        },
+        'extractor_retries': 3,
+        'fragment_retries': 3,
+    }
+    
+    # Try to use cookies if available
+    if os.path.exists(COOKIES_PATH):
+        opts['cookiefile'] = COOKIES_PATH
+    else:
+        # Try browser cookies as fallback
+        try:
+            opts['cookiesfrombrowser'] = ('chrome',)
+        except:
+            pass
+    
+    return opts
 
 def init_database():
     """Initialize SQLite database for storing user data (fallback if Firebase not available)"""
@@ -523,23 +557,54 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
                 self.send_json_response({'error': 'yt-dlp not installed on server'}, 500)
                 return
 
-            # Prefer m4a/aac or webm/opus audio-only formats
-            # Map desired quality to yt-dlp format selectors
-            quality_map = {
-                'high': 'bestaudio/best',
-                'medium': 'bestaudio[abr<=160]/bestaudio/best',
-                'low': 'bestaudio[abr<=96]/bestaudio[abr<=128]/bestaudio/best',
-            }
-            ydl_opts = {
-                'format': quality_map.get(quality, 'bestaudio/best'),
-                'quiet': True,
-                'no_warnings': True,
-                'skip_download': True,
-                'extract_flat': False,
-            }
+            # Use the improved yt-dlp options
+            ydl_opts = get_ytdl_opts(quality)
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(f'https://www.youtube.com/watch?v={video_id}', download=False)
+                try:
+                    info = ydl.extract_info(f'https://www.youtube.com/watch?v={video_id}', download=False)
+                except Exception as e:
+                    error_msg = str(e)
+                    if 'Sign in to confirm you\'re not a bot' in error_msg:
+                        print(f"Bot detection error for video {video_id}, trying fallback...")
+                        # Try different fallback strategies
+                        fallback_strategies = [
+                            # Strategy 1: No cookies, different user agent
+                            {
+                                'http_headers': {'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)'}
+                            },
+                            # Strategy 2: Mobile user agent
+                            {
+                                'http_headers': {'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1'}
+                            },
+                            # Strategy 3: Minimal options
+                            {
+                                'format': 'bestaudio',
+                                'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+                            }
+                        ]
+                        
+                        for i, strategy in enumerate(fallback_strategies):
+                            try:
+                                print(f"Trying fallback strategy {i+1}...")
+                                ydl_opts_fallback = get_ytdl_opts(quality)
+                                ydl_opts_fallback.update(strategy)
+                                ydl_opts_fallback.pop('cookiesfrombrowser', None)
+                                ydl_opts_fallback.pop('cookiefile', None)
+                                
+                                with yt_dlp.YoutubeDL(ydl_opts_fallback) as ydl_fallback:
+                                    info = ydl_fallback.extract_info(f'https://www.youtube.com/watch?v={video_id}', download=False)
+                                print(f"Fallback strategy {i+1} succeeded!")
+                                break
+                            except Exception as fallback_error:
+                                print(f"Fallback strategy {i+1} failed: {fallback_error}")
+                                if i == len(fallback_strategies) - 1:  # Last strategy failed
+                                    self.send_json_response({'error': 'Unable to access video due to YouTube restrictions. Please try a different song.'}, 403)
+                                    return
+                                continue
+                    else:
+                        raise e
+                
                 url = None
                 chosen = None
                 formats = info.get('formats') or []
@@ -610,22 +675,54 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
                 self.send_error(500, "yt-dlp not installed on server")
                 return
 
-            # Get the direct YouTube URL first
-            quality_map = {
-                'high': 'bestaudio/best',
-                'medium': 'bestaudio[abr<=160]/bestaudio/best',
-                'low': 'bestaudio[abr<=96]/bestaudio[abr<=128]/bestaudio/best',
-            }
-            ydl_opts = {
-                'format': quality_map.get(quality, 'bestaudio/best'),
-                'quiet': True,
-                'no_warnings': True,
-                'skip_download': True,
-                'extract_flat': False,
-            }
+            # Use the improved yt-dlp options
+            ydl_opts = get_ytdl_opts(quality)
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(f'https://www.youtube.com/watch?v={video_id}', download=False)
+                try:
+                    info = ydl.extract_info(f'https://www.youtube.com/watch?v={video_id}', download=False)
+                except Exception as e:
+                    error_msg = str(e)
+                    if 'Sign in to confirm you\'re not a bot' in error_msg:
+                        print(f"Bot detection error for video {video_id}, trying fallback...")
+                        # Try different fallback strategies
+                        fallback_strategies = [
+                            # Strategy 1: No cookies, different user agent
+                            {
+                                'http_headers': {'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)'}
+                            },
+                            # Strategy 2: Mobile user agent
+                            {
+                                'http_headers': {'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1'}
+                            },
+                            # Strategy 3: Minimal options
+                            {
+                                'format': 'bestaudio',
+                                'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+                            }
+                        ]
+                        
+                        for i, strategy in enumerate(fallback_strategies):
+                            try:
+                                print(f"Trying fallback strategy {i+1}...")
+                                ydl_opts_fallback = get_ytdl_opts(quality)
+                                ydl_opts_fallback.update(strategy)
+                                ydl_opts_fallback.pop('cookiesfrombrowser', None)
+                                ydl_opts_fallback.pop('cookiefile', None)
+                                
+                                with yt_dlp.YoutubeDL(ydl_opts_fallback) as ydl_fallback:
+                                    info = ydl_fallback.extract_info(f'https://www.youtube.com/watch?v={video_id}', download=False)
+                                print(f"Fallback strategy {i+1} succeeded!")
+                                break
+                            except Exception as fallback_error:
+                                print(f"Fallback strategy {i+1} failed: {fallback_error}")
+                                if i == len(fallback_strategies) - 1:  # Last strategy failed
+                                    self.send_error(403, "Unable to access video due to YouTube restrictions. Please try a different song.")
+                                    return
+                                continue
+                    else:
+                        raise e
+                
                 formats = info.get('formats') or []
                 
                 # Find the best audio format
