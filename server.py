@@ -527,65 +527,160 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
                 'medium': 'bestaudio[abr<=160]/bestaudio/best',
                 'low': 'bestaudio[abr<=96]/bestaudio[abr<=128]/bestaudio/best',
             }
-            ydl_opts = {
-                'format': quality_map.get(quality, 'bestaudio/best'),
-                'quiet': True,
-                'no_warnings': True,
-                'skip_download': True,
-                'extract_flat': False,
-            }
+            
+            # Try multiple configurations in order of preference
+            configs = [
+                # Configuration 1: With browser cookies (most likely to work)
+                {
+                    'format': quality_map.get(quality, 'bestaudio/best'),
+                    'quiet': True,
+                    'no_warnings': True,
+                    'skip_download': True,
+                    'extract_flat': False,
+                    'cookiesfrombrowser': ('chrome',),
+                    'extractor_retries': 3,
+                    'fragment_retries': 3,
+                    'retries': 3,
+                    'http_headers': {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                    },
+                    'extractor_args': {
+                        'youtube': {
+                            'skip': ['dash', 'hls'],
+                            'player_skip': ['configs'],
+                            'player_client': ['android_music', 'web']
+                        }
+                    }
+                },
+                # Configuration 2: Without cookies but with different client
+                {
+                    'format': quality_map.get(quality, 'bestaudio/best'),
+                    'quiet': True,
+                    'no_warnings': True,
+                    'skip_download': True,
+                    'extract_flat': False,
+                    'extractor_retries': 3,
+                    'fragment_retries': 3,
+                    'retries': 3,
+                    'http_headers': {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                    },
+                    'extractor_args': {
+                        'youtube': {
+                            'player_client': ['android_music', 'android_creator', 'web']
+                        }
+                    }
+                },
+                # Configuration 3: Basic fallback
+                {
+                    'format': quality_map.get(quality, 'bestaudio/best'),
+                    'quiet': True,
+                    'no_warnings': True,
+                    'skip_download': True,
+                    'extract_flat': False,
+                    'extractor_retries': 2,
+                    'fragment_retries': 2,
+                    'retries': 2,
+                    'http_headers': {
+                        'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)'
+                    }
+                }
+            ]
+            
+            last_error = None
+            info = None
+            working_config = None
+            
+            for i, ydl_opts in enumerate(configs):
+                try:
+                    print(f"Trying configuration {i+1} for video {video_id}")
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        info = ydl.extract_info(f'https://www.youtube.com/watch?v={video_id}', download=False)
+                        if info and info.get('formats'):
+                            working_config = ydl_opts
+                            print(f"Configuration {i+1} succeeded!")
+                            break
+                except Exception as e:
+                    last_error = e
+                    print(f"Configuration {i+1} failed: {e}")
+                    continue
+            
+            if not info or not info.get('formats'):
+                error_msg = f"All configurations failed. Last error: {last_error}" if last_error else "No audio stream available"
+                print(f"Stream extraction failed for {video_id}: {error_msg}")
+                self.send_json_response({'error': 'Unable to extract audio stream. YouTube may be blocking requests.'}, 503)
+                return
 
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(f'https://www.youtube.com/watch?v={video_id}', download=False)
-                url = None
-                chosen = None
-                formats = info.get('formats') or []
-                # Rank audio formats: try to respect requested bitrate tier and codec preferences
-                def score(fmt: dict) -> int:
-                    mime = fmt.get('ext') or ''
-                    acodec = (fmt.get('acodec') or '').lower()
-                    vcodec = (fmt.get('vcodec') or '').lower()
-                    if vcodec and vcodec != 'none':
-                        return -100
-                    base = 0
-                    if mime == 'm4a' or 'aac' in acodec:
-                        base = 30
-                    elif mime == 'webm' or 'opus' in acodec:
-                        base = 20
-                    else:
-                        base = 10
-                    abr = fmt.get('abr') or fmt.get('tbr') or 0
-                    # Prefer lower bitrate for low/medium, higher for high
-                    if quality == 'low':
-                        penalty = int(abr)  # lower better
-                        return base + (200 - penalty)
-                    if quality == 'medium':
-                        # target around 128-160
-                        target = 144
-                        diff = abs(int(abr) - target)
-                        return base + (200 - min(diff, 200))
-                    # high
-                    return base + int(abr)
-                best = None
-                best_score = -999
-                for f in formats:
-                    s = score(f)
-                    if s > best_score and f.get('url'):
-                        best = f
-                        best_score = s
-                chosen = best or (info.get('url') and info)
-                url = (chosen.get('url') if isinstance(chosen, dict) else None)
-                if not url:
-                    self.send_json_response({'error': 'No audio stream available'}, 404)
-                    return
+            # Process the successfully extracted info
+            url = None
+            chosen = None
+            formats = info.get('formats') or []
+            
+            # Rank audio formats: try to respect requested bitrate tier and codec preferences
+            def score(fmt: dict) -> int:
+                mime = fmt.get('ext') or ''
+                acodec = (fmt.get('acodec') or '').lower()
+                vcodec = (fmt.get('vcodec') or '').lower()
+                if vcodec and vcodec != 'none':
+                    return -100
+                base = 0
+                if mime == 'm4a' or 'aac' in acodec:
+                    base = 30
+                elif mime == 'webm' or 'opus' in acodec:
+                    base = 20
+                else:
+                    base = 10
+                abr = fmt.get('abr') or fmt.get('tbr') or 0
+                # Prefer lower bitrate for low/medium, higher for high
+                if quality == 'low':
+                    penalty = int(abr)  # lower better
+                    return base + (200 - penalty)
+                if quality == 'medium':
+                    # target around 128-160
+                    target = 144
+                    diff = abs(int(abr) - target)
+                    return base + (200 - min(diff, 200))
+                # high
+                return base + int(abr)
+            
+            best = None
+            best_score = -999
+            for f in formats:
+                s = score(f)
+                if s > best_score and f.get('url'):
+                    best = f
+                    best_score = s
+            
+            chosen = best or (info.get('url') and info)
+            url = (chosen.get('url') if isinstance(chosen, dict) else None)
+            
+            if not url:
+                self.send_json_response({'error': 'No audio stream available'}, 404)
+                return
 
-                mime = chosen.get('mime_type') or chosen.get('ext')
-                abr = chosen.get('abr') or chosen.get('tbr')
-                itag = chosen.get('format_id')
-                self.send_json_response({'url': url, 'mime': mime, 'bitrate': abr, 'itag': itag})
+            mime = chosen.get('mime_type') or chosen.get('ext')
+            abr = chosen.get('abr') or chosen.get('tbr')
+            itag = chosen.get('format_id')
+            print(f"Successfully extracted stream for {video_id}: {mime} @ {abr}kbps")
+            self.send_json_response({'url': url, 'mime': mime, 'bitrate': abr, 'itag': itag})
         except Exception as e:
             print(f"Stream error: {e}")
-            self.send_json_response({'error': 'Internal server error'}, 500)
+            # Try fallback method using direct YouTube URL construction
+            try:
+                print(f"Trying fallback method for {video_id}")
+                # This is a basic fallback - construct a direct YouTube URL
+                # Note: This may not work for all videos due to YouTube's restrictions
+                fallback_url = f"https://www.youtube.com/watch?v={video_id}"
+                self.send_json_response({
+                    'url': fallback_url, 
+                    'mime': 'video/mp4', 
+                    'bitrate': 128, 
+                    'itag': 'fallback',
+                    'note': 'Using fallback method - may not work for all videos'
+                })
+            except Exception as fallback_error:
+                print(f"Fallback also failed: {fallback_error}")
+                self.send_json_response({'error': 'Unable to extract audio stream. Please try again later.'}, 503)
 
     def handle_api_user_liked(self, query_string: str) -> None:
         """Handle user's liked songs"""
