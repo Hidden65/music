@@ -45,15 +45,25 @@ def get_ytdl_opts(quality: str = 'high') -> dict:
         'fragment_retries': 3,
     }
     
-    # Try to use cookies if available
-    if os.path.exists(COOKIES_PATH):
-        opts['cookiefile'] = COOKIES_PATH
+    # Only try cookies in local development, not in production
+    is_production = os.environ.get('RENDER') or os.environ.get('HEROKU') or os.environ.get('VERCEL')
+    
+    if not is_production:
+        # Try to use cookies if available (local development only)
+        if os.path.exists(COOKIES_PATH):
+            opts['cookiefile'] = COOKIES_PATH
+        else:
+            # Try browser cookies as fallback (local development only)
+            try:
+                opts['cookiesfrombrowser'] = ('chrome',)
+            except:
+                pass
     else:
-        # Try browser cookies as fallback
-        try:
-            opts['cookiesfrombrowser'] = ('chrome',)
-        except:
-            pass
+        # Production environment - use more robust settings
+        print("Production environment detected, using optimized settings")
+        opts['http_headers']['User-Agent'] = 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)'
+        opts['extractor_retries'] = 5
+        opts['fragment_retries'] = 5
     
     return opts
 
@@ -567,20 +577,32 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
                     error_msg = str(e)
                     if 'Sign in to confirm you\'re not a bot' in error_msg:
                         print(f"Bot detection error for video {video_id}, trying fallback...")
-                        # Try different fallback strategies
+                        # Try different fallback strategies optimized for production
                         fallback_strategies = [
-                            # Strategy 1: No cookies, different user agent
+                            # Strategy 1: Googlebot user agent (most reliable for production)
                             {
-                                'http_headers': {'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)'}
+                                'http_headers': {'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)'},
+                                'extractor_retries': 5,
+                                'fragment_retries': 5
                             },
                             # Strategy 2: Mobile user agent
                             {
-                                'http_headers': {'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1'}
+                                'http_headers': {'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Mobile/15E148 Safari/604.1'},
+                                'extractor_retries': 3,
+                                'fragment_retries': 3
                             },
-                            # Strategy 3: Minimal options
+                            # Strategy 3: Firefox user agent
                             {
-                                'format': 'bestaudio',
-                                'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+                                'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:91.0) Gecko/20100101 Firefox/91.0'},
+                                'extractor_retries': 3,
+                                'fragment_retries': 3
+                            },
+                            # Strategy 4: Minimal options with basic format
+                            {
+                                'format': 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio',
+                                'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'},
+                                'extractor_retries': 2,
+                                'fragment_retries': 2
                             }
                         ]
                         
@@ -589,6 +611,7 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
                                 print(f"Trying fallback strategy {i+1}...")
                                 ydl_opts_fallback = get_ytdl_opts(quality)
                                 ydl_opts_fallback.update(strategy)
+                                # Always remove cookie options in fallback
                                 ydl_opts_fallback.pop('cookiesfrombrowser', None)
                                 ydl_opts_fallback.pop('cookiefile', None)
                                 
@@ -685,20 +708,32 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
                     error_msg = str(e)
                     if 'Sign in to confirm you\'re not a bot' in error_msg:
                         print(f"Bot detection error for video {video_id}, trying fallback...")
-                        # Try different fallback strategies
+                        # Try different fallback strategies optimized for production
                         fallback_strategies = [
-                            # Strategy 1: No cookies, different user agent
+                            # Strategy 1: Googlebot user agent (most reliable for production)
                             {
-                                'http_headers': {'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)'}
+                                'http_headers': {'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)'},
+                                'extractor_retries': 5,
+                                'fragment_retries': 5
                             },
                             # Strategy 2: Mobile user agent
                             {
-                                'http_headers': {'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1'}
+                                'http_headers': {'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Mobile/15E148 Safari/604.1'},
+                                'extractor_retries': 3,
+                                'fragment_retries': 3
                             },
-                            # Strategy 3: Minimal options
+                            # Strategy 3: Firefox user agent
                             {
-                                'format': 'bestaudio',
-                                'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+                                'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:91.0) Gecko/20100101 Firefox/91.0'},
+                                'extractor_retries': 3,
+                                'fragment_retries': 3
+                            },
+                            # Strategy 4: Minimal options with basic format
+                            {
+                                'format': 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio',
+                                'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'},
+                                'extractor_retries': 2,
+                                'fragment_retries': 2
                             }
                         ]
                         
@@ -707,6 +742,7 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
                                 print(f"Trying fallback strategy {i+1}...")
                                 ydl_opts_fallback = get_ytdl_opts(quality)
                                 ydl_opts_fallback.update(strategy)
+                                # Always remove cookie options in fallback
                                 ydl_opts_fallback.pop('cookiesfrombrowser', None)
                                 ydl_opts_fallback.pop('cookiefile', None)
                                 
