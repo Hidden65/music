@@ -20,52 +20,8 @@ except ImportError:
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(ROOT_DIR, 'wave_music.db')
-COOKIES_PATH = os.path.join(ROOT_DIR, 'youtube_cookies.txt')
 # Optional: external backend for fallback (disabled by default)
 REMOTE_BASE_URL = os.environ.get('REMOTE_BASE_URL')
-
-def get_ytdl_opts(quality: str = 'high') -> dict:
-    """Get yt-dlp options with proper cookie handling and bot detection avoidance"""
-    quality_map = {
-        'high': 'bestaudio/best',
-        'medium': 'bestaudio[abr<=160]/bestaudio/best',
-        'low': 'bestaudio[abr<=96]/bestaudio[abr<=128]/bestaudio/best',
-    }
-    
-    opts = {
-        'format': quality_map.get(quality, 'bestaudio/best'),
-        'quiet': True,
-        'no_warnings': True,
-        'skip_download': True,
-        'extract_flat': False,
-        'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        },
-        'extractor_retries': 3,
-        'fragment_retries': 3,
-    }
-    
-    # Only try cookies in local development, not in production
-    is_production = os.environ.get('RENDER') or os.environ.get('HEROKU') or os.environ.get('VERCEL')
-    
-    if not is_production:
-        # Try to use cookies if available (local development only)
-        if os.path.exists(COOKIES_PATH):
-            opts['cookiefile'] = COOKIES_PATH
-        else:
-            # Try browser cookies as fallback (local development only)
-            try:
-                opts['cookiesfrombrowser'] = ('chrome',)
-            except:
-                pass
-    else:
-        # Production environment - use more robust settings
-        print("Production environment detected, using optimized settings")
-        opts['http_headers']['User-Agent'] = 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)'
-        opts['extractor_retries'] = 5
-        opts['fragment_retries'] = 5
-    
-    return opts
 
 def init_database():
     """Initialize SQLite database for storing user data (fallback if Firebase not available)"""
@@ -269,9 +225,6 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
             return
         elif path == '/api/stream':
             self.handle_api_stream(parsed.query)
-            return
-        elif path == '/api/proxy_audio':
-            self.handle_api_proxy_audio(parsed.query)
             return
         
         # Serve static files
@@ -549,7 +502,7 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
         self.send_json_response({'results': results})
 
     def handle_api_stream(self, query_string: str) -> None:
-        """Return a proxied audio URL for a given YouTube video ID using yt-dlp.
+        """Return a direct audio URL for a given YouTube video ID using yt-dlp.
 
         Response: { url: string, itag?: number, mime?: string, bitrate?: number }
         """
@@ -567,67 +520,23 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
                 self.send_json_response({'error': 'yt-dlp not installed on server'}, 500)
                 return
 
-            # Use the improved yt-dlp options
-            ydl_opts = get_ytdl_opts(quality)
+            # Prefer m4a/aac or webm/opus audio-only formats
+            # Map desired quality to yt-dlp format selectors
+            quality_map = {
+                'high': 'bestaudio/best',
+                'medium': 'bestaudio[abr<=160]/bestaudio/best',
+                'low': 'bestaudio[abr<=96]/bestaudio[abr<=128]/bestaudio/best',
+            }
+            ydl_opts = {
+                'format': quality_map.get(quality, 'bestaudio/best'),
+                'quiet': True,
+                'no_warnings': True,
+                'skip_download': True,
+                'extract_flat': False,
+            }
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                try:
-                    info = ydl.extract_info(f'https://www.youtube.com/watch?v={video_id}', download=False)
-                except Exception as e:
-                    error_msg = str(e)
-                    if 'Sign in to confirm you\'re not a bot' in error_msg:
-                        print(f"Bot detection error for video {video_id}, trying fallback...")
-                        # Try different fallback strategies optimized for production
-                        fallback_strategies = [
-                            # Strategy 1: Googlebot user agent (most reliable for production)
-                            {
-                                'http_headers': {'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)'},
-                                'extractor_retries': 5,
-                                'fragment_retries': 5
-                            },
-                            # Strategy 2: Mobile user agent
-                            {
-                                'http_headers': {'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Mobile/15E148 Safari/604.1'},
-                                'extractor_retries': 3,
-                                'fragment_retries': 3
-                            },
-                            # Strategy 3: Firefox user agent
-                            {
-                                'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:91.0) Gecko/20100101 Firefox/91.0'},
-                                'extractor_retries': 3,
-                                'fragment_retries': 3
-                            },
-                            # Strategy 4: Minimal options with basic format
-                            {
-                                'format': 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio',
-                                'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'},
-                                'extractor_retries': 2,
-                                'fragment_retries': 2
-                            }
-                        ]
-                        
-                        for i, strategy in enumerate(fallback_strategies):
-                            try:
-                                print(f"Trying fallback strategy {i+1}...")
-                                ydl_opts_fallback = get_ytdl_opts(quality)
-                                ydl_opts_fallback.update(strategy)
-                                # Always remove cookie options in fallback
-                                ydl_opts_fallback.pop('cookiesfrombrowser', None)
-                                ydl_opts_fallback.pop('cookiefile', None)
-                                
-                                with yt_dlp.YoutubeDL(ydl_opts_fallback) as ydl_fallback:
-                                    info = ydl_fallback.extract_info(f'https://www.youtube.com/watch?v={video_id}', download=False)
-                                print(f"Fallback strategy {i+1} succeeded!")
-                                break
-                            except Exception as fallback_error:
-                                print(f"Fallback strategy {i+1} failed: {fallback_error}")
-                                if i == len(fallback_strategies) - 1:  # Last strategy failed
-                                    self.send_json_response({'error': 'Unable to access video due to YouTube restrictions. Please try a different song.'}, 403)
-                                    return
-                                continue
-                    else:
-                        raise e
-                
+                info = ydl.extract_info(f'https://www.youtube.com/watch?v={video_id}', download=False)
                 url = None
                 chosen = None
                 formats = info.get('formats') or []
@@ -673,158 +582,10 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
                 mime = chosen.get('mime_type') or chosen.get('ext')
                 abr = chosen.get('abr') or chosen.get('tbr')
                 itag = chosen.get('format_id')
-                
-                # Return a proxied URL instead of direct YouTube URL to avoid CORS issues
-                proxy_url = f"/api/proxy_audio?videoId={video_id}&quality={quality}"
-                self.send_json_response({'url': proxy_url, 'mime': mime, 'bitrate': abr, 'itag': itag})
+                self.send_json_response({'url': url, 'mime': mime, 'bitrate': abr, 'itag': itag})
         except Exception as e:
             print(f"Stream error: {e}")
             self.send_json_response({'error': 'Internal server error'}, 500)
-
-    def handle_api_proxy_audio(self, query_string: str) -> None:
-        """Proxy audio content from YouTube to avoid CORS issues"""
-        params = urllib.parse.parse_qs(query_string or '')
-        video_id = (params.get('videoId', [''])[0] or '').strip()
-        quality = (params.get('quality', ['high'])[0] or 'high').strip().lower()
-        
-        if not video_id:
-            self.send_error(400, "Video ID required")
-            return
-
-        try:
-            try:
-                import yt_dlp  # type: ignore
-            except Exception:
-                self.send_error(500, "yt-dlp not installed on server")
-                return
-
-            # Use the improved yt-dlp options
-            ydl_opts = get_ytdl_opts(quality)
-
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                try:
-                    info = ydl.extract_info(f'https://www.youtube.com/watch?v={video_id}', download=False)
-                except Exception as e:
-                    error_msg = str(e)
-                    if 'Sign in to confirm you\'re not a bot' in error_msg:
-                        print(f"Bot detection error for video {video_id}, trying fallback...")
-                        # Try different fallback strategies optimized for production
-                        fallback_strategies = [
-                            # Strategy 1: Googlebot user agent (most reliable for production)
-                            {
-                                'http_headers': {'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)'},
-                                'extractor_retries': 5,
-                                'fragment_retries': 5
-                            },
-                            # Strategy 2: Mobile user agent
-                            {
-                                'http_headers': {'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Mobile/15E148 Safari/604.1'},
-                                'extractor_retries': 3,
-                                'fragment_retries': 3
-                            },
-                            # Strategy 3: Firefox user agent
-                            {
-                                'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:91.0) Gecko/20100101 Firefox/91.0'},
-                                'extractor_retries': 3,
-                                'fragment_retries': 3
-                            },
-                            # Strategy 4: Minimal options with basic format
-                            {
-                                'format': 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio',
-                                'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'},
-                                'extractor_retries': 2,
-                                'fragment_retries': 2
-                            }
-                        ]
-                        
-                        for i, strategy in enumerate(fallback_strategies):
-                            try:
-                                print(f"Trying fallback strategy {i+1}...")
-                                ydl_opts_fallback = get_ytdl_opts(quality)
-                                ydl_opts_fallback.update(strategy)
-                                # Always remove cookie options in fallback
-                                ydl_opts_fallback.pop('cookiesfrombrowser', None)
-                                ydl_opts_fallback.pop('cookiefile', None)
-                                
-                                with yt_dlp.YoutubeDL(ydl_opts_fallback) as ydl_fallback:
-                                    info = ydl_fallback.extract_info(f'https://www.youtube.com/watch?v={video_id}', download=False)
-                                print(f"Fallback strategy {i+1} succeeded!")
-                                break
-                            except Exception as fallback_error:
-                                print(f"Fallback strategy {i+1} failed: {fallback_error}")
-                                if i == len(fallback_strategies) - 1:  # Last strategy failed
-                                    self.send_error(403, "Unable to access video due to YouTube restrictions. Please try a different song.")
-                                    return
-                                continue
-                    else:
-                        raise e
-                
-                formats = info.get('formats') or []
-                
-                # Find the best audio format
-                def score(fmt: dict) -> int:
-                    mime = fmt.get('ext') or ''
-                    acodec = (fmt.get('acodec') or '').lower()
-                    vcodec = (fmt.get('vcodec') or '').lower()
-                    if vcodec and vcodec != 'none':
-                        return -100
-                    base = 0
-                    if mime == 'm4a' or 'aac' in acodec:
-                        base = 30
-                    elif mime == 'webm' or 'opus' in acodec:
-                        base = 20
-                    else:
-                        base = 10
-                    abr = fmt.get('abr') or fmt.get('tbr') or 0
-                    if quality == 'low':
-                        penalty = int(abr)
-                        return base + (200 - penalty)
-                    if quality == 'medium':
-                        target = 144
-                        diff = abs(int(abr) - target)
-                        return base + (200 - min(diff, 200))
-                    return base + int(abr)
-                
-                best = None
-                best_score = -999
-                for f in formats:
-                    s = score(f)
-                    if s > best_score and f.get('url'):
-                        best = f
-                        best_score = s
-                
-                if not best or not best.get('url'):
-                    self.send_error(404, "No audio stream available")
-                    return
-
-                # Stream the audio content
-                audio_url = best.get('url')
-                mime_type = best.get('mime_type') or 'audio/mpeg'
-                
-                # Fetch the audio content from YouTube
-                req = urllib.request.Request(audio_url, headers={
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-                })
-                
-                with urllib.request.urlopen(req) as response:
-                    # Set appropriate headers for audio streaming
-                    self.send_response(200)
-                    self.send_header('Content-Type', mime_type)
-                    self.send_header('Access-Control-Allow-Origin', '*')
-                    self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
-                    self.send_header('Access-Control-Allow-Headers', 'Content-Type')
-                    self.send_header('Cache-Control', 'public, max-age=3600')
-                    
-                    # Stream the content
-                    while True:
-                        chunk = response.read(8192)
-                        if not chunk:
-                            break
-                        self.wfile.write(chunk)
-                        
-        except Exception as e:
-            print(f"Proxy audio error: {e}")
-            self.send_error(500, "Internal server error")
 
     def handle_api_user_liked(self, query_string: str) -> None:
         """Handle user's liked songs"""
