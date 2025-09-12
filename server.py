@@ -226,6 +226,9 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
         elif path == '/api/stream':
             self.handle_api_stream(parsed.query)
             return
+        elif path == '/api/proxy_audio':
+            self.handle_api_proxy_audio(parsed.query)
+            return
         
         # Serve static files
         if path == '/':
@@ -502,12 +505,13 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
         self.send_json_response({'results': results})
 
     def handle_api_stream(self, query_string: str) -> None:
-        """Return a direct audio URL for a given YouTube video ID using yt-dlp.
+        """Return a proxied audio URL for a given YouTube video ID using yt-dlp.
 
         Response: { url: string, itag?: number, mime?: string, bitrate?: number }
         """
         params = urllib.parse.parse_qs(query_string or '')
         video_id = (params.get('videoId', [''])[0] or '').strip()
+        quality = (params.get('quality', ['high'])[0] or 'high').strip().lower()
         if not video_id:
             self.send_json_response({'error': 'Video ID required'}, 400)
             return
@@ -520,8 +524,14 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
                 return
 
             # Prefer m4a/aac or webm/opus audio-only formats
+            # Map desired quality to yt-dlp format selectors
+            quality_map = {
+                'high': 'bestaudio/best',
+                'medium': 'bestaudio[abr<=160]/bestaudio/best',
+                'low': 'bestaudio[abr<=96]/bestaudio[abr<=128]/bestaudio/best',
+            }
             ydl_opts = {
-                'format': 'bestaudio/best',
+                'format': quality_map.get(quality, 'bestaudio/best'),
                 'quiet': True,
                 'no_warnings': True,
                 'skip_download': True,
@@ -533,18 +543,32 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
                 url = None
                 chosen = None
                 formats = info.get('formats') or []
-                # Rank audio formats: m4a > webm opus > others
+                # Rank audio formats: try to respect requested bitrate tier and codec preferences
                 def score(fmt: dict) -> int:
                     mime = fmt.get('ext') or ''
                     acodec = (fmt.get('acodec') or '').lower()
                     vcodec = (fmt.get('vcodec') or '').lower()
                     if vcodec and vcodec != 'none':
                         return -100
+                    base = 0
                     if mime == 'm4a' or 'aac' in acodec:
-                        return 3
-                    if mime == 'webm' or 'opus' in acodec:
-                        return 2
-                    return 1
+                        base = 30
+                    elif mime == 'webm' or 'opus' in acodec:
+                        base = 20
+                    else:
+                        base = 10
+                    abr = fmt.get('abr') or fmt.get('tbr') or 0
+                    # Prefer lower bitrate for low/medium, higher for high
+                    if quality == 'low':
+                        penalty = int(abr)  # lower better
+                        return base + (200 - penalty)
+                    if quality == 'medium':
+                        # target around 128-160
+                        target = 144
+                        diff = abs(int(abr) - target)
+                        return base + (200 - min(diff, 200))
+                    # high
+                    return base + int(abr)
                 best = None
                 best_score = -999
                 for f in formats:
@@ -561,10 +585,113 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
                 mime = chosen.get('mime_type') or chosen.get('ext')
                 abr = chosen.get('abr') or chosen.get('tbr')
                 itag = chosen.get('format_id')
-                self.send_json_response({'url': url, 'mime': mime, 'bitrate': abr, 'itag': itag})
+                
+                # Return a proxied URL instead of direct YouTube URL to avoid CORS issues
+                proxy_url = f"/api/proxy_audio?videoId={video_id}&quality={quality}"
+                self.send_json_response({'url': proxy_url, 'mime': mime, 'bitrate': abr, 'itag': itag})
         except Exception as e:
             print(f"Stream error: {e}")
             self.send_json_response({'error': 'Internal server error'}, 500)
+
+    def handle_api_proxy_audio(self, query_string: str) -> None:
+        """Proxy audio content from YouTube to avoid CORS issues"""
+        params = urllib.parse.parse_qs(query_string or '')
+        video_id = (params.get('videoId', [''])[0] or '').strip()
+        quality = (params.get('quality', ['high'])[0] or 'high').strip().lower()
+        
+        if not video_id:
+            self.send_error(400, "Video ID required")
+            return
+
+        try:
+            try:
+                import yt_dlp  # type: ignore
+            except Exception:
+                self.send_error(500, "yt-dlp not installed on server")
+                return
+
+            # Get the direct YouTube URL first
+            quality_map = {
+                'high': 'bestaudio/best',
+                'medium': 'bestaudio[abr<=160]/bestaudio/best',
+                'low': 'bestaudio[abr<=96]/bestaudio[abr<=128]/bestaudio/best',
+            }
+            ydl_opts = {
+                'format': quality_map.get(quality, 'bestaudio/best'),
+                'quiet': True,
+                'no_warnings': True,
+                'skip_download': True,
+                'extract_flat': False,
+            }
+
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(f'https://www.youtube.com/watch?v={video_id}', download=False)
+                formats = info.get('formats') or []
+                
+                # Find the best audio format
+                def score(fmt: dict) -> int:
+                    mime = fmt.get('ext') or ''
+                    acodec = (fmt.get('acodec') or '').lower()
+                    vcodec = (fmt.get('vcodec') or '').lower()
+                    if vcodec and vcodec != 'none':
+                        return -100
+                    base = 0
+                    if mime == 'm4a' or 'aac' in acodec:
+                        base = 30
+                    elif mime == 'webm' or 'opus' in acodec:
+                        base = 20
+                    else:
+                        base = 10
+                    abr = fmt.get('abr') or fmt.get('tbr') or 0
+                    if quality == 'low':
+                        penalty = int(abr)
+                        return base + (200 - penalty)
+                    if quality == 'medium':
+                        target = 144
+                        diff = abs(int(abr) - target)
+                        return base + (200 - min(diff, 200))
+                    return base + int(abr)
+                
+                best = None
+                best_score = -999
+                for f in formats:
+                    s = score(f)
+                    if s > best_score and f.get('url'):
+                        best = f
+                        best_score = s
+                
+                if not best or not best.get('url'):
+                    self.send_error(404, "No audio stream available")
+                    return
+
+                # Stream the audio content
+                audio_url = best.get('url')
+                mime_type = best.get('mime_type') or 'audio/mpeg'
+                
+                # Fetch the audio content from YouTube
+                req = urllib.request.Request(audio_url, headers={
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                })
+                
+                with urllib.request.urlopen(req) as response:
+                    # Set appropriate headers for audio streaming
+                    self.send_response(200)
+                    self.send_header('Content-Type', mime_type)
+                    self.send_header('Access-Control-Allow-Origin', '*')
+                    self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+                    self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+                    self.send_header('Cache-Control', 'public, max-age=3600')
+                    
+                    # Stream the content
+                    while True:
+                        chunk = response.read(8192)
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                        
+        except Exception as e:
+            print(f"Proxy audio error: {e}")
+            self.send_error(500, "Internal server error")
 
     def handle_api_user_liked(self, query_string: str) -> None:
         """Handle user's liked songs"""
