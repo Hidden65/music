@@ -502,7 +502,7 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
         self.send_json_response({'results': results})
 
     def handle_api_stream(self, query_string: str) -> None:
-        """Return a direct audio URL for a given YouTube video ID using multiple methods.
+        """Return a direct audio URL for a given YouTube video ID using working method.
 
         Response: { url: string, itag?: number, mime?: string, bitrate?: number }
         """
@@ -515,371 +515,34 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
 
         print(f"Stream request for video: {video_id}, quality: {quality}")
 
-        # Try the simple working method first (similar to web version)
+        # Use ONLY the working method - no yt-dlp at all
         try:
-            result = self._try_simple_stream_extraction(video_id, quality)
+            result = self._get_working_stream_url(video_id, quality)
             if result:
-                print(f"Stream extraction successful using simple method")
+                print(f"Stream extraction successful using working method")
                 self.send_json_response(result)
                 return
         except Exception as e:
-            print(f"Simple method failed: {e}")
+            print(f"Working method failed: {e}")
 
-        # Try multiple methods in order of preference
-        methods = [
-            self._try_ytmusicapi_stream,
-            self._try_alternative_extraction,
-            self._try_ytdlp_with_cookies,
-            self._try_ytdlp_stealth,
-            self._try_direct_construction
-        ]
-
-        for method in methods:
-            try:
-                result = method(video_id, quality)
-                if result:
-                    print(f"Stream extraction successful using {method.__name__}")
-                    self.send_json_response(result)
-                    return
-            except Exception as e:
-                print(f"Method {method.__name__} failed: {e}")
-                continue
-
-        # If all methods fail, return a working fallback
-        print(f"All methods failed for video: {video_id}, returning fallback")
+        # If the working method fails, return a direct YouTube URL
+        print(f"Working method failed for video: {video_id}, returning YouTube URL")
         self.send_json_response({
             'url': f'https://www.youtube.com/watch?v={video_id}',
             'mime': 'video/mp4',
             'bitrate': 128,
             'itag': '140',
             'videoId': video_id,
-            'source': 'fallback_youtube_url',
-            'warning': 'Using YouTube URL fallback - may require additional processing'
+            'source': 'youtube_direct_url',
+            'warning': 'Using direct YouTube URL - may require additional processing'
         })
 
-    def _try_ytmusicapi_stream(self, video_id: str, quality: str) -> dict:
-        """Try to get stream URL using ytmusicapi"""
-        if not self.ytmusic:
-            return None
-            
+    # All old yt-dlp methods removed to prevent errors
+
+    def _get_working_stream_url(self, video_id: str, quality: str) -> dict:
+        """Get working stream URL using a reliable method that doesn't use yt-dlp"""
         try:
-            print(f"Trying ytmusicapi stream extraction for: {video_id}")
-            watch_data = self.ytmusic.get_watch_playlist(video_id)
-            if watch_data and 'tracks' in watch_data and watch_data['tracks']:
-                track = watch_data['tracks'][0]
-                if 'videoId' in track and track['videoId'] == video_id:
-                    if 'streamUrl' in track:
-                        return {
-                            'url': track['streamUrl'],
-                            'mime': 'audio/mp4',
-                            'bitrate': 128,
-                            'itag': '140',
-                            'videoId': video_id,
-                            'source': 'ytmusicapi'
-                        }
-        except Exception as e:
-            print(f"ytmusicapi stream extraction failed: {e}")
-        return None
-
-    def _try_alternative_extraction(self, video_id: str, quality: str) -> dict:
-        """Try alternative extraction method using requests and BeautifulSoup"""
-        try:
-            print(f"Trying alternative extraction for: {video_id}")
-            import requests
-            from bs4 import BeautifulSoup
-            
-            # Get the video page
-            url = f"https://www.youtube.com/watch?v={video_id}"
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.5',
-                'Accept-Encoding': 'gzip, deflate',
-                'DNT': '1',
-                'Connection': 'keep-alive',
-                'Upgrade-Insecure-Requests': '1',
-            }
-            
-            response = requests.get(url, headers=headers, timeout=30)
-            if response.status_code == 200:
-                soup = BeautifulSoup(response.text, 'html.parser')
-                
-                # Look for player config in script tags
-                scripts = soup.find_all('script')
-                for script in scripts:
-                    if script.string and 'player_response' in script.string:
-                        # Extract player response JSON
-                        import re
-                        import json
-                        
-                        match = re.search(r'var ytInitialPlayerResponse = ({.+?});', script.string)
-                        if match:
-                            try:
-                                player_data = json.loads(match.group(1))
-                                streaming_data = player_data.get('streamingData', {})
-                                formats = streaming_data.get('formats', [])
-                                adaptive_formats = streaming_data.get('adaptiveFormats', [])
-                                
-                                # Look for audio-only formats
-                                audio_formats = [f for f in adaptive_formats if f.get('mimeType', '').startswith('audio/')]
-                                
-                                if audio_formats:
-                                    # Choose best quality audio format
-                                    quality_map = {'high': 192, 'medium': 128, 'low': 96}
-                                    target_bitrate = quality_map.get(quality, 128)
-                                    
-                                    best_format = None
-                                    best_diff = float('inf')
-                                    
-                                    for fmt in audio_formats:
-                                        bitrate = fmt.get('bitrate', 0)
-                                        diff = abs(bitrate - target_bitrate)
-                                        if diff < best_diff:
-                                            best_format = fmt
-                                            best_diff = diff
-                                    
-                                    if best_format and best_format.get('url'):
-                                        return {
-                                            'url': best_format['url'],
-                                            'mime': best_format.get('mimeType', 'audio/mp4'),
-                                            'bitrate': best_format.get('bitrate', 128),
-                                            'itag': best_format.get('itag', '140'),
-                                            'videoId': video_id,
-                                            'source': 'alternative_extraction'
-                                        }
-                            except Exception as e:
-                                print(f"Failed to parse player response: {e}")
-                                continue
-        except Exception as e:
-            print(f"Alternative extraction failed: {e}")
-        return None
-
-    def _try_ytdlp_with_cookies(self, video_id: str, quality: str) -> dict:
-        """Try yt-dlp with proper cookie authentication"""
-        try:
-            print(f"Trying yt-dlp with cookies for: {video_id}")
-            import yt_dlp
-            
-            # Create a simple cookie file with basic YouTube cookies
-            cookie_data = self._generate_basic_cookies()
-            
-            ydl_opts = {
-                'format': 'bestaudio/best',
-                'quiet': True,
-                'no_warnings': True,
-                'skip_download': True,
-                'extract_flat': False,
-                'cookies': cookie_data,
-                'http_headers': {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                    'Accept-Language': 'en-US,en;q=0.5',
-                    'Accept-Encoding': 'gzip, deflate',
-                    'DNT': '1',
-                    'Connection': 'keep-alive',
-                    'Upgrade-Insecure-Requests': '1',
-                },
-                'sleep_interval': 2,
-                'max_sleep_interval': 8,
-                'retries': 3,
-                'fragment_retries': 3,
-                'socket_timeout': 30,
-                'ratelimit': 500000,  # 500KB/s rate limit
-            }
-            
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(f'https://www.youtube.com/watch?v={video_id}', download=False)
-                
-                formats = info.get('formats', [])
-                if formats:
-                    # Find best audio format
-                    audio_formats = [f for f in formats if f.get('acodec') != 'none' and f.get('vcodec') == 'none']
-                    if audio_formats:
-                        best_format = audio_formats[0]  # yt-dlp already sorted by quality
-                        return {
-                            'url': best_format['url'],
-                            'mime': best_format.get('mime_type', 'audio/mp4'),
-                            'bitrate': best_format.get('abr', 128),
-                            'itag': best_format.get('format_id', '140'),
-                            'videoId': video_id,
-                            'source': 'ytdlp_with_cookies'
-                        }
-        except Exception as e:
-            print(f"yt-dlp with cookies failed: {e}")
-        return None
-
-    def _try_ytdlp_stealth(self, video_id: str, quality: str) -> dict:
-        """Try yt-dlp with stealth mode and advanced options"""
-        try:
-            print(f"Trying yt-dlp stealth mode for: {video_id}")
-            import yt_dlp
-            
-            ydl_opts = {
-                'format': 'bestaudio/best',
-                'quiet': True,
-                'no_warnings': True,
-                'skip_download': True,
-                'extract_flat': False,
-                'http_headers': {
-                    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-                    'Accept-Language': 'en-US,en;q=0.9',
-                    'Accept-Encoding': 'gzip, deflate, br',
-                    'DNT': '1',
-                    'Connection': 'keep-alive',
-                    'Upgrade-Insecure-Requests': '1',
-                    'Sec-Fetch-Dest': 'document',
-                    'Sec-Fetch-Mode': 'navigate',
-                    'Sec-Fetch-Site': 'none',
-                    'Sec-Fetch-User': '?1',
-                    'Cache-Control': 'max-age=0',
-                },
-                'sleep_interval': 3,
-                'max_sleep_interval': 12,
-                'retries': 5,
-                'fragment_retries': 5,
-                'socket_timeout': 45,
-                'ratelimit': 200000,  # 200KB/s rate limit
-                'extractor_args': {
-                    'youtube': {
-                        'skip': ['dash', 'hls'],
-                        'player_skip': ['configs'],
-                    }
-                }
-            }
-            
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(f'https://www.youtube.com/watch?v={video_id}', download=False)
-                
-                formats = info.get('formats', [])
-                if formats:
-                    # Find best audio format
-                    audio_formats = [f for f in formats if f.get('acodec') != 'none' and f.get('vcodec') == 'none']
-                    if audio_formats:
-                        best_format = audio_formats[0]
-                        return {
-                            'url': best_format['url'],
-                            'mime': best_format.get('mime_type', 'audio/mp4'),
-                            'bitrate': best_format.get('abr', 128),
-                            'itag': best_format.get('format_id', '140'),
-                            'videoId': video_id,
-                            'source': 'ytdlp_stealth'
-                        }
-        except Exception as e:
-            print(f"yt-dlp stealth mode failed: {e}")
-        return None
-
-    def _try_direct_construction(self, video_id: str, quality: str) -> dict:
-        """Try to construct direct streaming URLs using known patterns"""
-        try:
-            print(f"Trying direct URL construction for: {video_id}")
-            
-            # Known YouTube audio format patterns
-            quality_map = {
-                'high': ['140', '141', '256'],    # 128kbps m4a, 256kbps m4a
-                'medium': ['140', '141'],         # 128kbps m4a
-                'low': ['140'],                   # 128kbps m4a
-            }
-            
-            itags = quality_map.get(quality, ['140'])
-            
-            for itag in itags:
-                # Try different URL patterns
-                patterns = [
-                    f"https://rr1---sn-{itag}.googlevideo.com/videoplayback?{self._generate_video_params(video_id, itag)}",
-                    f"https://manifest.googlevideo.com/api/manifest/dash/ms/{video_id}",
-                ]
-                
-                for url in patterns:
-                    try:
-                        import requests
-                        response = requests.head(url, timeout=10, allow_redirects=True)
-                        if response.status_code == 200:
-                            return {
-                                'url': url,
-                                'mime': 'audio/mp4',
-                                'bitrate': 128 if itag == '140' else 256,
-                                'itag': itag,
-                                'videoId': video_id,
-                                'source': 'direct_construction',
-                                'warning': 'Using direct construction - may be unstable'
-                            }
-                    except Exception:
-                        continue
-        except Exception as e:
-            print(f"Direct construction failed: {e}")
-        return None
-
-    def _generate_basic_cookies(self) -> str:
-        """Generate basic cookies for YouTube authentication"""
-        import tempfile
-        import os
-        
-        # Create a temporary cookie file with basic YouTube cookies
-        cookie_content = """# Netscape HTTP Cookie File
-.youtube.com	TRUE	/	FALSE	0	VISITOR_INFO1_LIVE	{random_string}
-.youtube.com	TRUE	/	FALSE	0	YSC	{random_string}
-.youtube.com	TRUE	/	FALSE	0	PREF	f1=50000000&f6=40000000
-"""
-        
-        # Generate random strings for cookie values
-        import random
-        import string
-        random_string = ''.join(random.choices(string.ascii_letters + string.digits, k=20))
-        cookie_content = cookie_content.replace('{random_string}', random_string)
-        
-        # Write to temporary file
-        temp_file = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt')
-        temp_file.write(cookie_content)
-        temp_file.close()
-        
-        return temp_file.name
-
-    def _generate_video_params(self, video_id: str, itag: str) -> str:
-        """Generate video parameters for direct URL construction"""
-        import time
-        import random
-        
-        # Basic parameters for YouTube video URLs
-        params = {
-            'id': video_id,
-            'itag': itag,
-            'source': 'youtube',
-            'requiressl': 'yes',
-            'mm': '31,29',
-            'mn': 'sn-4g5e6n7s,sn-4g5e6n7z',
-            'ms': 'au,rdu',
-            'mv': 'm',
-            'mvi': '4',
-            'pl': '24',
-            'initcwndbps': '2125000',
-            'vprv': '1',
-            'mime': 'audio/mp4',
-            'ns': 'yt',
-            'gir': 'yes',
-            'clen': '0',
-            'dur': '0.0',
-            'lmt': '0',
-            'mt': str(int(time.time())),
-            'fvip': '4',
-            'keepalive': 'yes',
-            'fexp': '24007246',
-            'c': 'WEB',
-            'txp': '5535432',
-            'n': 'random_string',
-            'sparams': 'expire,ei,ip,id,itag,source,requiressl,vprv,mime,ns,gir,clen,dur,lmt',
-            'lsparams': 'mh,mhm,mha,mhm2,mhmm,pl,initcwndbps',
-            'lsig': 'random_signature',
-            'sig': 'random_signature',
-        }
-        
-        # Convert to query string
-        return '&'.join([f"{k}={v}" for k, v in params.items()])
-
-    def _try_simple_stream_extraction(self, video_id: str, quality: str) -> dict:
-        """Simple stream extraction method that works reliably (similar to web version)"""
-        try:
-            print(f"Trying simple stream extraction for: {video_id}")
+            print(f"Getting working stream URL for: {video_id}")
             import requests
             import re
             import json
@@ -973,11 +636,11 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
                 'bitrate': best_format.get('bitrate', 128),
                 'itag': best_format.get('itag', '140'),
                 'videoId': video_id,
-                'source': 'simple_extraction'
+                'source': 'working_extraction'
             }
             
         except Exception as e:
-            print(f"Simple stream extraction failed: {e}")
+            print(f"Working stream extraction failed: {e}")
             return None
 
     def handle_api_user_liked(self, query_string: str) -> None:
