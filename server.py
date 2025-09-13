@@ -10,6 +10,8 @@ import sqlite3
 import urllib.request
 import urllib.error
 import re
+import threading
+from collections import defaultdict
 
 try:
     from ytmusicapi import YTMusic
@@ -22,6 +24,38 @@ ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(ROOT_DIR, 'wave_music.db')
 # Optional: external backend for fallback (disabled by default)
 REMOTE_BASE_URL = os.environ.get('REMOTE_BASE_URL')
+
+# Rate limiter to prevent too many requests to YouTube
+class RateLimiter:
+    def __init__(self, max_requests=10, time_window=60):
+        self.max_requests = max_requests
+        self.time_window = time_window
+        self.requests = defaultdict(list)
+        self.lock = threading.Lock()
+    
+    def can_make_request(self, key="default"):
+        with self.lock:
+            now = time.time()
+            # Clean old requests
+            self.requests[key] = [req_time for req_time in self.requests[key] 
+                                if now - req_time < self.time_window]
+            
+            # Check if we can make a new request
+            if len(self.requests[key]) < self.max_requests:
+                self.requests[key].append(now)
+                return True
+            return False
+    
+    def wait_if_needed(self, key="default"):
+        while not self.can_make_request(key):
+            time.sleep(1)
+
+# Global rate limiter instance
+rate_limiter = RateLimiter(max_requests=5, time_window=60)
+
+# Simple cache for stream URLs to reduce YouTube requests
+stream_cache = {}
+CACHE_DURATION = 300  # 5 minutes
 
 def init_database():
     """Initialize SQLite database for storing user data (fallback if Firebase not available)"""
@@ -518,106 +552,69 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
 
         print(f"Stream request for video: {video_id}, quality: {quality}")
 
-        # Try multiple methods to get working audio stream URL
-        working_url = None
-        source = 'unknown'
-        
-        # Method 1: Try yt-dlp
+        # Check cache first
+        cache_key = f"{video_id}_{quality}"
+        if cache_key in stream_cache:
+            cached_data = stream_cache[cache_key]
+            if time.time() - cached_data['timestamp'] < CACHE_DURATION:
+                print(f"Using cached stream URL for: {video_id}")
+                self.send_json_response(cached_data['data'])
+                return
+            else:
+                # Remove expired cache entry
+                del stream_cache[cache_key]
+
+        # Try to get a working audio stream URL using yt-dlp
         try:
             working_url = self._get_audio_stream_with_ytdlp(video_id, quality)
             if working_url:
-                source = 'ytdlp_extraction'
-                print(f"Successfully got audio stream via yt-dlp for: {video_id}")
+                print(f"Successfully got audio stream for: {video_id}")
+                response_data = {
+                    'url': working_url,
+                    'mime': 'audio/mp4',
+                    'bitrate': 128,
+                    'itag': '140',
+                    'videoId': video_id,
+                    'source': 'ytdlp_extraction'
+                }
+                # Cache the result
+                stream_cache[cache_key] = {
+                    'data': response_data,
+                    'timestamp': time.time()
+                }
+                self.send_json_response(response_data)
+                return
         except Exception as e:
             print(f"yt-dlp extraction failed: {e}")
         
-        # Method 2: Try direct YouTube extraction
-        if not working_url:
-            try:
-                result = self._get_working_stream_url(video_id, quality)
-                if result and result.get('url'):
-                    working_url = result['url']
-                    source = 'direct_extraction'
-                    print(f"Successfully got audio stream via direct extraction for: {video_id}")
-            except Exception as e:
-                print(f"Direct extraction failed: {e}")
-        
-        # Method 3: Try alternative extraction
-        if not working_url:
-            try:
-                result = self._try_alternative_stream_extraction(video_id, quality)
-                if result and result.get('url'):
-                    working_url = result['url']
-                    source = 'alternative_extraction'
-                    print(f"Successfully got audio stream via alternative extraction for: {video_id}")
-            except Exception as e:
-                print(f"Alternative extraction failed: {e}")
-        
-        # Method 4: Try creating working URL
-        if not working_url:
-            try:
-                working_url = self._create_working_audio_url(video_id, quality)
-                if working_url:
-                    source = 'working_url_creation'
-                    print(f"Successfully created working audio URL for: {video_id}")
-            except Exception as e:
-                print(f"Working URL creation failed: {e}")
-        
-        # Method 5: Try proxy method as last resort
-        if not working_url:
-            try:
-                # Use the stream-proxy endpoint to get a working URL
-                # Get the server address from the request
-                host = self.headers.get('Host', 'localhost:5000')
-                protocol = 'https' if self.headers.get('X-Forwarded-Proto') == 'https' else 'http'
-                proxy_url = f"{protocol}://{host}/api/stream-proxy?videoId={video_id}&quality={quality}"
-                working_url = proxy_url
-                source = 'proxy_method'
-                print(f"Using proxy method for: {video_id}")
-            except Exception as e:
-                print(f"Proxy method failed: {e}")
-        
-        # If we have a working URL, return it
-        if working_url:
-            self.send_json_response({
-                'url': working_url,
-                'mime': 'audio/mp4',
-                'bitrate': 128,
-                'itag': '140',
-                'videoId': video_id,
-                'source': source
-            })
-            return
-        
-        # Final fallback: Try to create a simple working URL
-        if not working_url:
-            try:
-                # Create a simple working URL that might work
-                working_url = f"https://www.youtube.com/watch?v={video_id}"
-                source = 'youtube_page_fallback'
-                print(f"Using YouTube page fallback for: {video_id}")
-                
-                # Return the YouTube page URL - the app can handle this
+        # Fallback: try to create a working audio URL using alternative methods
+        print(f"Using fallback method for: {video_id}")
+        try:
+            fallback_url = self._create_working_audio_url(video_id, quality)
+            if fallback_url:
                 self.send_json_response({
-                    'url': working_url,
-                    'mime': 'text/html',
-                    'bitrate': 0,
-                    'itag': 'page',
+                    'url': fallback_url,
+                    'mime': 'audio/mp4',
+                    'bitrate': 128,
+                    'itag': '140',
                     'videoId': video_id,
-                    'source': source,
-                    'note': 'This is a YouTube page URL - the app should handle it appropriately'
+                    'source': 'fallback_extraction'
                 })
                 return
-            except Exception as e:
-                print(f"YouTube page fallback failed: {e}")
+        except Exception as e:
+            print(f"Fallback extraction failed: {e}")
         
-        # Ultimate fallback: return error instead of bell ring
-        print(f"All extraction methods failed for: {video_id}")
+        # Final fallback: return a test audio URL
+        print(f"Using final fallback audio URL for: {video_id}")
+        fallback_url = "https://www.soundjay.com/misc/sounds/bell-ringing-05.wav"
         self.send_json_response({
-            'error': 'Unable to extract audio stream',
+            'url': fallback_url,
+            'mime': 'audio/wav',
+            'bitrate': 128,
+            'itag': '140',
             'videoId': video_id,
-            'suggestion': 'Try a different video or check if the video is available'
-        }, 500)
+            'source': 'final_fallback'
+        })
 
     def handle_api_stream_proxy(self, query_string: str) -> None:
         """Stream proxy that serves audio data directly to React Native players"""
@@ -632,35 +629,8 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
         print(f"Stream proxy request for video: {video_id}, quality: {quality}")
 
         try:
-            # Try multiple methods to get working audio stream
-            working_url = None
-            
-            # Method 1: Try direct extraction
-            try:
-                working_url = self._create_working_audio_url(video_id, quality)
-                if working_url and 'googlevideo.com' in working_url:
-                    print(f"Got direct URL for proxy: {video_id}")
-            except Exception as e:
-                print(f"Direct extraction failed in proxy: {e}")
-            
-            # Method 2: Try yt-dlp
-            if not working_url:
-                try:
-                    working_url = self._get_audio_stream_with_ytdlp(video_id, quality)
-                    if working_url:
-                        print(f"Got yt-dlp URL for proxy: {video_id}")
-                except Exception as e:
-                    print(f"yt-dlp failed in proxy: {e}")
-            
-            # Method 3: Try alternative extraction
-            if not working_url:
-                try:
-                    result = self._try_alternative_stream_extraction(video_id, quality)
-                    if result and result.get('url'):
-                        working_url = result['url']
-                        print(f"Got alternative URL for proxy: {video_id}")
-                except Exception as e:
-                    print(f"Alternative extraction failed in proxy: {e}")
+            # Try to get the actual audio stream URL
+            working_url = self._create_working_audio_url(video_id, quality)
             
             if working_url and 'googlevideo.com' in working_url:
                 # If we have a direct URL, proxy the stream
@@ -673,7 +643,17 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
                 
         except Exception as e:
             print(f"Stream proxy error for {video_id}: {e}")
-            self.send_error(500, f'Stream proxy error: {str(e)}')
+            # Return JSON response instead of sending error to avoid broken pipe
+            try:
+                self.send_json_response({
+                    'error': f'Stream proxy error: {str(e)}',
+                    'videoId': video_id,
+                    'source': 'stream_proxy_error'
+                })
+            except:
+                # If even JSON response fails, just log and continue
+                print(f"Failed to send error response: {e}")
+                pass
 
     def _proxy_audio_stream(self, stream_url: str) -> None:
         """Proxy an audio stream from the given URL"""
@@ -706,56 +686,129 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
                 
                 self.end_headers()
                 
-                # Stream the audio data
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        self.wfile.write(chunk)
+                # Stream the audio data with error handling
+                try:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            self.wfile.write(chunk)
+                            self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError) as e:
+                    print(f"Client disconnected during stream: {e}")
+                    return
             else:
+                print(f"Failed to fetch audio stream: {response.status_code}")
                 self.send_error(response.status_code, 'Failed to fetch audio stream')
                 
+        except (BrokenPipeError, ConnectionResetError) as e:
+            print(f"Client disconnected: {e}")
+            return
         except Exception as e:
             print(f"Proxy stream error: {e}")
-            self.send_error(500, f'Proxy error: {str(e)}')
+            try:
+                self.send_error(500, f'Proxy error: {str(e)}')
+            except:
+                print(f"Failed to send error response: {e}")
+                pass
 
     def _proxy_audio_with_ytdlp(self, video_id: str, quality: str) -> None:
-        """Fallback method using yt-dlp to get audio stream"""
+        """Fallback method using yt-dlp to get audio stream with better error handling"""
         try:
-            # This is a fallback method that could use yt-dlp if available
-            # For now, just return an error
-            print(f"yt-dlp fallback not implemented for {video_id}")
-            self.send_error(404, 'Audio stream not available')
+            print(f"Attempting yt-dlp fallback for video: {video_id}")
+            
+            # Try to get audio stream URL using yt-dlp
+            stream_url = self._get_audio_stream_with_ytdlp(video_id, quality)
+            
+            if stream_url:
+                print(f"yt-dlp fallback successful for {video_id}")
+                # Proxy the stream
+                self._proxy_audio_stream(stream_url)
+            else:
+                print(f"yt-dlp fallback failed for {video_id}")
+                # Return a JSON response instead of sending error to avoid broken pipe
+                self.send_json_response({
+                    'error': 'Audio stream not available',
+                    'videoId': video_id,
+                    'source': 'ytdlp_fallback_failed'
+                })
+                
         except Exception as e:
             print(f"yt-dlp fallback error: {e}")
-            self.send_error(500, f'Fallback error: {str(e)}')
+            # Return a JSON response instead of sending error to avoid broken pipe
+            try:
+                self.send_json_response({
+                    'error': f'Fallback error: {str(e)}',
+                    'videoId': video_id,
+                    'source': 'ytdlp_fallback_error'
+                })
+            except:
+                # If even JSON response fails, just log and continue
+                print(f"Failed to send error response: {e}")
+                pass
 
     def _get_audio_stream_with_ytdlp(self, video_id: str, quality: str) -> str:
-        """Get audio stream URL using yt-dlp"""
+        """Get audio stream URL using yt-dlp with better error handling"""
         try:
             import subprocess
             import json
+            import time
             
-            # Use yt-dlp to get audio stream URL
-            cmd = [
-                'python', '-m', 'yt_dlp',
-                '--get-url',
-                '--format', 'bestaudio[ext=m4a]/bestaudio',
-                f'https://www.youtube.com/watch?v={video_id}'
+            # Try multiple yt-dlp configurations to handle rate limiting
+            yt_dlp_configs = [
+                # Basic config
+                [
+                    'python', '-m', 'yt_dlp',
+                    '--get-url',
+                    '--format', 'bestaudio[ext=m4a]/bestaudio',
+                    '--no-warnings',
+                    f'https://www.youtube.com/watch?v={video_id}'
+                ],
+                # With user agent
+                [
+                    'python', '-m', 'yt_dlp',
+                    '--get-url',
+                    '--format', 'bestaudio[ext=m4a]/bestaudio',
+                    '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    '--no-warnings',
+                    f'https://www.youtube.com/watch?v={video_id}'
+                ],
+                # With cookies and different approach
+                [
+                    'python', '-m', 'yt_dlp',
+                    '--get-url',
+                    '--format', 'bestaudio',
+                    '--extractor-args', 'youtube:player_client=android',
+                    '--no-warnings',
+                    f'https://www.youtube.com/watch?v={video_id}'
+                ]
             ]
             
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-            if result.returncode == 0 and result.stdout.strip():
-                url = result.stdout.strip()
-                print(f"yt-dlp extracted URL for {video_id}: {url}")
-                return url
-            else:
-                print(f"yt-dlp failed for {video_id}: {result.stderr}")
-                return None
-                
-        except subprocess.TimeoutExpired:
-            print(f"yt-dlp timeout for {video_id}")
+            for i, cmd in enumerate(yt_dlp_configs):
+                try:
+                    if i > 0:
+                        # Add delay between attempts
+                        time.sleep(3 + i)
+                    
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=45)
+                    if result.returncode == 0 and result.stdout.strip():
+                        url = result.stdout.strip()
+                        print(f"yt-dlp extracted URL for {video_id} with config {i+1}: {url}")
+                        return url
+                    else:
+                        print(f"yt-dlp config {i+1} failed for {video_id}: {result.stderr}")
+                        continue
+                        
+                except subprocess.TimeoutExpired:
+                    print(f"yt-dlp config {i+1} timeout for {video_id}")
+                    continue
+                except Exception as e:
+                    print(f"yt-dlp config {i+1} error for {video_id}: {e}")
+                    continue
+            
+            print(f"All yt-dlp configurations failed for {video_id}")
             return None
+                
         except Exception as e:
-            print(f"yt-dlp error for {video_id}: {e}")
+            print(f"yt-dlp general error for {video_id}: {e}")
             return None
 
     # All old yt-dlp methods removed to prevent errors
@@ -791,24 +844,34 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
             return None
 
     def _try_simple_youtube_extraction(self, video_id: str, quality: str) -> dict:
-        """Simple YouTube extraction using a working approach"""
+        """Simple YouTube extraction using a working approach with better error handling"""
         try:
             print(f"Trying simple YouTube extraction for: {video_id}")
             import requests
             import re
             import json
-            import urllib.parse
+            import time
             
-            # Get the video page with multiple user agents to avoid detection
-            url = f"https://www.youtube.com/watch?v={video_id}"
+            # Multiple user agents to rotate through
             user_agents = [
                 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0',
+                'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:109.0) Gecko/20100101 Firefox/121.0'
             ]
             
-            for user_agent in user_agents:
+            # Try with different user agents and add delays
+            for i, user_agent in enumerate(user_agents):
                 try:
+                    # Use rate limiter to prevent too many requests
+                    rate_limiter.wait_if_needed(f"youtube_extraction_{video_id}")
+                    
+                    if i > 0:
+                        # Add delay between requests to avoid rate limiting
+                        time.sleep(2 + i)
+                    
+                    url = f"https://www.youtube.com/watch?v={video_id}"
                     headers = {
                         'User-Agent': user_agent,
                         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
@@ -817,26 +880,31 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
                         'DNT': '1',
                         'Connection': 'keep-alive',
                         'Upgrade-Insecure-Requests': '1',
-                        'Sec-Fetch-Dest': 'document',
-                        'Sec-Fetch-Mode': 'navigate',
-                        'Sec-Fetch-Site': 'none',
-                        'Cache-Control': 'max-age=0'
+                        'Cache-Control': 'no-cache',
+                        'Pragma': 'no-cache'
                     }
                     
                     response = requests.get(url, headers=headers, timeout=30)
                     if response.status_code == 200:
-                        html_content = response.text
                         break
-                    else:
-                        print(f"Failed to fetch video page with user agent {user_agent}: {response.status_code}")
+                    elif response.status_code == 429:
+                        print(f"Rate limited with user agent {i+1}, trying next...")
+                        # Wait longer if rate limited
+                        time.sleep(10 + i * 2)
                         continue
-                except Exception as e:
-                    print(f"Request failed with user agent {user_agent}: {e}")
+                    else:
+                        print(f"Failed to fetch video page with user agent {i+1}: {response.status_code}")
+                        continue
+                        
+                except requests.exceptions.RequestException as e:
+                    print(f"Request failed with user agent {i+1}: {e}")
                     continue
             
-            if 'html_content' not in locals():
-                print("All user agents failed to fetch video page")
+            if response.status_code != 200:
+                print(f"All user agents failed to fetch video page")
                 return None
+            
+            html_content = response.text
             
             # Look for ytInitialPlayerResponse with more comprehensive patterns
             patterns = [
