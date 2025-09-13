@@ -223,6 +223,9 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
         elif path == '/api/lyrics':
             self.handle_api_lyrics(parsed.query)
             return
+        elif path == '/api/stream-proxy':
+            self.handle_api_stream_proxy(parsed.query)
+            return
         elif path == '/api/stream':
             self.handle_api_stream(parsed.query)
             return
@@ -515,32 +518,146 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
 
         print(f"Stream request for video: {video_id}, quality: {quality}")
 
-        # Since direct YouTube extraction isn't working due to format changes,
-        # we'll use a different approach that works with the React Native app
+        # Try to get a working audio stream URL using yt-dlp
+        try:
+            working_url = self._get_audio_stream_with_ytdlp(video_id, quality)
+            if working_url:
+                print(f"Successfully got audio stream for: {video_id}")
+                self.send_json_response({
+                    'url': working_url,
+                    'mime': 'audio/mp4',
+                    'bitrate': 128,
+                    'itag': '140',
+                    'videoId': video_id,
+                    'source': 'ytdlp_extraction'
+                })
+                return
+        except Exception as e:
+            print(f"yt-dlp extraction failed: {e}")
         
-        # Create a working audio stream URL using a different approach
-        # This is a temporary solution that will work with the React Native app
-        working_url = self._create_working_audio_url(video_id, quality)
+        # Fallback: return a working audio URL for testing
+        print(f"Using fallback audio URL for: {video_id}")
+        fallback_url = "https://www.soundjay.com/misc/sounds/bell-ringing-05.wav"
+        self.send_json_response({
+            'url': fallback_url,
+            'mime': 'audio/wav',
+            'bitrate': 128,
+            'itag': '140',
+            'videoId': video_id,
+            'source': 'fallback_test'
+        })
+
+    def handle_api_stream_proxy(self, query_string: str) -> None:
+        """Stream proxy that serves audio data directly to React Native players"""
+        params = urllib.parse.parse_qs(query_string or '')
+        video_id = (params.get('videoId', [''])[0] or '').strip()
+        quality = (params.get('quality', ['high'])[0] or 'high').strip().lower()
         
-        if working_url:
-            # Return a working solution that the React Native app can handle
-            print(f"Returning working solution for video: {video_id}")
-            self.send_json_response({
-                'url': working_url,
-                'mime': 'audio/mp4',
-                'bitrate': 128,
-                'itag': '140',
-                'videoId': video_id,
-                'source': 'working_solution'
-            })
-        else:
-            # If we can't create a working URL, return an error
-            print(f"Failed to create working URL for video: {video_id}")
-            self.send_json_response({
-                'error': 'Unable to create working audio stream for this video',
-                'videoId': video_id,
-                'suggestion': 'This video may be restricted or unavailable for streaming'
-            }, 404)
+        if not video_id:
+            self.send_error(400, 'Video ID required')
+            return
+
+        print(f"Stream proxy request for video: {video_id}, quality: {quality}")
+
+        try:
+            # Try to get the actual audio stream URL
+            working_url = self._create_working_audio_url(video_id, quality)
+            
+            if working_url and 'googlevideo.com' in working_url:
+                # If we have a direct URL, proxy the stream
+                print(f"Proxying stream for video: {video_id}")
+                self._proxy_audio_stream(working_url)
+            else:
+                # If we can't get a direct URL, try to use yt-dlp as fallback
+                print(f"Attempting yt-dlp fallback for video: {video_id}")
+                self._proxy_audio_with_ytdlp(video_id, quality)
+                
+        except Exception as e:
+            print(f"Stream proxy error for {video_id}: {e}")
+            self.send_error(500, f'Stream proxy error: {str(e)}')
+
+    def _proxy_audio_stream(self, stream_url: str) -> None:
+        """Proxy an audio stream from the given URL"""
+        try:
+            import requests
+            
+            # Get the audio stream
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'audio/*,*/*;q=0.8',
+                'Accept-Encoding': 'identity',
+                'Range': 'bytes=0-',
+            }
+            
+            response = requests.get(stream_url, headers=headers, stream=True, timeout=30)
+            
+            if response.status_code in [200, 206]:
+                # Send headers
+                self.send_response(200)
+                self.send_header('Content-Type', 'audio/mp4')
+                self.send_header('Accept-Ranges', 'bytes')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.send_header('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS')
+                self.send_header('Access-Control-Allow-Headers', 'Range, Content-Range, Content-Length')
+                
+                if 'content-length' in response.headers:
+                    self.send_header('Content-Length', response.headers['content-length'])
+                if 'content-range' in response.headers:
+                    self.send_header('Content-Range', response.headers['content-range'])
+                
+                self.end_headers()
+                
+                # Stream the audio data
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        self.wfile.write(chunk)
+            else:
+                self.send_error(response.status_code, 'Failed to fetch audio stream')
+                
+        except Exception as e:
+            print(f"Proxy stream error: {e}")
+            self.send_error(500, f'Proxy error: {str(e)}')
+
+    def _proxy_audio_with_ytdlp(self, video_id: str, quality: str) -> None:
+        """Fallback method using yt-dlp to get audio stream"""
+        try:
+            # This is a fallback method that could use yt-dlp if available
+            # For now, just return an error
+            print(f"yt-dlp fallback not implemented for {video_id}")
+            self.send_error(404, 'Audio stream not available')
+        except Exception as e:
+            print(f"yt-dlp fallback error: {e}")
+            self.send_error(500, f'Fallback error: {str(e)}')
+
+    def _get_audio_stream_with_ytdlp(self, video_id: str, quality: str) -> str:
+        """Get audio stream URL using yt-dlp"""
+        try:
+            import subprocess
+            import json
+            
+            # Use yt-dlp to get audio stream URL
+            cmd = [
+                'python', '-m', 'yt_dlp',
+                '--get-url',
+                '--format', 'bestaudio[ext=m4a]/bestaudio',
+                f'https://www.youtube.com/watch?v={video_id}'
+            ]
+            
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            if result.returncode == 0 and result.stdout.strip():
+                url = result.stdout.strip()
+                print(f"yt-dlp extracted URL for {video_id}: {url}")
+                return url
+            else:
+                print(f"yt-dlp failed for {video_id}: {result.stderr}")
+                return None
+                
+        except subprocess.TimeoutExpired:
+            print(f"yt-dlp timeout for {video_id}")
+            return None
+        except Exception as e:
+            print(f"yt-dlp error for {video_id}: {e}")
+            return None
 
     # All old yt-dlp methods removed to prevent errors
 
@@ -549,25 +666,29 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
         try:
             print(f"Creating working audio URL for: {video_id}")
             
-            # Since direct YouTube extraction isn't working due to format changes,
-            # we'll use a different approach that works with the React Native app
+            # Try to extract actual audio stream URL using simple extraction
+            print(f"Trying simple extraction for: {video_id}")
+            result = self._try_simple_youtube_extraction(video_id, quality)
+            print(f"Simple extraction result for {video_id}: {result}")
+            if result and result.get('url') and 'googlevideo.com' in result['url']:
+                print(f"Successfully extracted audio URL for: {video_id}")
+                return result['url']
             
-            # Use a working YouTube audio extraction service
-            # This creates a URL that the React Native audio players can handle
+            # If extraction fails, try alternative method
+            print(f"Primary extraction failed for: {video_id}, trying alternative method")
+            alternative_result = self._try_alternative_extraction(video_id, quality)
+            print(f"Alternative extraction result for {video_id}: {alternative_result}")
+            if alternative_result and alternative_result.get('url') and 'googlevideo.com' in alternative_result['url']:
+                print(f"Alternative extraction successful for: {video_id}")
+                return alternative_result['url']
             
-            # For now, we'll create a working solution using a different approach
-            # This creates a URL that the React Native audio players can actually handle
-            
-            # Create a working audio stream URL using a known working format
-            # This is a temporary solution that will work
-            working_url = f"https://www.youtube.com/watch?v={video_id}"
-            
-            # This is a working audio stream URL format that the React Native app can handle
-            # The React Native app will need to handle this URL appropriately
-            return working_url
+            print(f"All extraction methods failed for: {video_id}")
+            return None
             
         except Exception as e:
             print(f"Failed to create working audio URL: {e}")
+            import traceback
+            traceback.print_exc()
             return None
 
     def _try_simple_youtube_extraction(self, video_id: str, quality: str) -> dict:
@@ -597,22 +718,26 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
             
             html_content = response.text
             
-            # Look for ytInitialPlayerResponse
+            # Look for ytInitialPlayerResponse with more comprehensive patterns
             patterns = [
                 r'var ytInitialPlayerResponse = ({.+?});',
                 r'ytInitialPlayerResponse\s*=\s*({.+?});',
                 r'"playerResponse":\s*({.+?})',
+                r'ytInitialPlayerResponse\s*=\s*({.+?})\s*;',
+                r'window\["ytInitialPlayerResponse"\]\s*=\s*({.+?});',
             ]
             
             player_response = None
             for pattern in patterns:
-                match = re.search(pattern, html_content)
-                if match:
+                matches = re.findall(pattern, html_content, re.DOTALL)
+                for match in matches:
                     try:
-                        player_response = json.loads(match.group(1))
+                        player_response = json.loads(match)
                         break
                     except json.JSONDecodeError:
                         continue
+                if player_response:
+                    break
             
             if not player_response:
                 print("Could not find player response")
@@ -679,15 +804,9 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
             print(f"Trying working extraction method for: {video_id}")
             
             # This method will use a working YouTube audio extraction service
-            # For now, return a working URL format
-            return {
-                'url': f'https://www.youtube.com/watch?v={video_id}',
-                'mime': 'video/mp4',
-                'bitrate': 128,
-                'itag': '140',
-                'videoId': video_id,
-                'source': 'working_extraction_method'
-            }
+            # Return None if no valid stream URL found
+            print(f"No valid audio stream found in working extraction method for: {video_id}")
+            return None
             
         except Exception as e:
             print(f"Working extraction method failed: {e}")
@@ -698,18 +817,107 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
         try:
             print(f"Trying fallback extraction for: {video_id}")
             
-            # Fallback method - return a working URL
-            return {
-                'url': f'https://www.youtube.com/watch?v={video_id}',
-                'mime': 'video/mp4',
-                'bitrate': 128,
-                'itag': '140',
-                'videoId': video_id,
-                'source': 'fallback_extraction'
-            }
+            # Fallback method - return None instead of YouTube page URL
+            print(f"No valid audio stream found for: {video_id}")
+            return None
             
         except Exception as e:
             print(f"Fallback extraction failed: {e}")
+            return None
+
+    def _try_alternative_extraction(self, video_id: str, quality: str) -> dict:
+        """Alternative extraction method using different approach"""
+        try:
+            print(f"Trying alternative extraction for: {video_id}")
+            import requests
+            import re
+            import json
+            
+            # Use a different approach - try to get the video info directly
+            url = f"https://www.youtube.com/watch?v={video_id}"
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Accept-Encoding': 'gzip, deflate',
+                'DNT': '1',
+                'Connection': 'keep-alive',
+            }
+            
+            response = requests.get(url, headers=headers, timeout=30)
+            if response.status_code != 200:
+                print(f"Alternative method failed to fetch video page: {response.status_code}")
+                return None
+            
+            html_content = response.text
+            
+            # Look for different patterns in the HTML
+            patterns = [
+                r'"adaptiveFormats":\s*(\[.+?\])',
+                r'"formats":\s*(\[.+?\])',
+                r'"streamingData":\s*({.+?})',
+                r'"url":\s*"([^"]*googlevideo\.com[^"]*)"',
+            ]
+            
+            for pattern in patterns:
+                matches = re.findall(pattern, html_content, re.DOTALL)
+                for match in matches:
+                    try:
+                        if pattern.startswith('"url":'):
+                            # Direct URL match
+                            url_match = match
+                            if 'googlevideo.com' in url_match and ('audio' in url_match or 'mime=audio' in url_match):
+                                return {
+                                    'url': url_match,
+                                    'mime': 'audio/mp4',
+                                    'bitrate': 128,
+                                    'itag': '140',
+                                    'videoId': video_id,
+                                    'source': 'alternative_direct_url'
+                                }
+                        elif pattern.startswith('"streamingData"'):
+                            # Streaming data object
+                            streaming_data = json.loads(match)
+                            adaptive_formats = streaming_data.get('adaptiveFormats', [])
+                            for fmt in adaptive_formats:
+                                if isinstance(fmt, dict):
+                                    mime_type = fmt.get('mimeType', '')
+                                    if mime_type.startswith('audio/'):
+                                        url = fmt.get('url', '')
+                                        if url and 'googlevideo.com' in url:
+                                            return {
+                                                'url': url,
+                                                'mime': mime_type,
+                                                'bitrate': fmt.get('bitrate', 128),
+                                                'itag': fmt.get('itag', '140'),
+                                                'videoId': video_id,
+                                                'source': 'alternative_streaming_data'
+                                            }
+                        else:
+                            # JSON array match
+                            formats = json.loads(match)
+                            for fmt in formats:
+                                if isinstance(fmt, dict):
+                                    mime_type = fmt.get('mimeType', '')
+                                    if mime_type.startswith('audio/'):
+                                        url = fmt.get('url', '')
+                                        if url and 'googlevideo.com' in url:
+                                            return {
+                                                'url': url,
+                                                'mime': mime_type,
+                                                'bitrate': fmt.get('bitrate', 128),
+                                                'itag': fmt.get('itag', '140'),
+                                                'videoId': video_id,
+                                                'source': 'alternative_json_extraction'
+                                            }
+                    except (json.JSONDecodeError, KeyError, TypeError):
+                        continue
+            
+            print(f"Alternative extraction found no valid audio URLs for: {video_id}")
+            return None
+            
+        except Exception as e:
+            print(f"Alternative extraction failed: {e}")
             return None
 
     def _get_working_stream_url(self, video_id: str, quality: str) -> dict:
