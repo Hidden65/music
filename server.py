@@ -187,34 +187,12 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
             
         super().__init__(*args, directory=ROOT_DIR, **kwargs)
 
-    def handle_api_health(self) -> None:
-        """Handle health check requests"""
-        try:
-            health_data = {
-                'status': 'healthy',
-                'timestamp': time.time(),
-                'ytmusic_available': YTMUSIC_AVAILABLE,
-                'ytmusic_initialized': self.ytmusic is not None,
-                'database_path': DB_PATH,
-                'remote_base_url': REMOTE_BASE_URL is not None
-            }
-            self.send_json_response(health_data)
-        except Exception as e:
-            self.send_json_response({
-                'status': 'unhealthy',
-                'error': str(e),
-                'timestamp': time.time()
-            }, 500)
-
     def do_GET(self):  # noqa: N802 (keep stdlib naming)
         parsed = urllib.parse.urlsplit(self.path)
         path = parsed.path
         
         # API routes
-        if path == '/api/health':
-            self.handle_api_health()
-            return
-        elif path == '/api/search':
+        if path == '/api/search':
             self.handle_api_search(parsed.query)
             return
         elif path == '/api/trending':
@@ -540,80 +518,106 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
 
         print(f"Stream request for video: {video_id}, quality: {quality}")
 
-        # Try to get a working audio stream URL using yt-dlp first
+        # Try multiple methods to get working audio stream URL
+        working_url = None
+        source = 'unknown'
+        
+        # Method 1: Try yt-dlp
         try:
             working_url = self._get_audio_stream_with_ytdlp(video_id, quality)
             if working_url:
-                print(f"Successfully got audio stream for: {video_id}")
-                self.send_json_response({
-                    'url': working_url,
-                    'mime': 'audio/mp4',
-                    'bitrate': 128,
-                    'itag': '140',
-                    'videoId': video_id,
-                    'source': 'ytdlp_extraction'
-                })
-                return
+                source = 'ytdlp_extraction'
+                print(f"Successfully got audio stream via yt-dlp for: {video_id}")
         except Exception as e:
             print(f"yt-dlp extraction failed: {e}")
         
-        # Try alternative extraction methods
-        try:
-            print(f"Trying alternative extraction methods for: {video_id}")
-            result = self._create_working_audio_url(video_id, quality)
-            if result:
-                print(f"Alternative extraction successful for: {video_id}")
-                self.send_json_response({
-                    'url': result,
-                    'mime': 'audio/mp4',
-                    'bitrate': 128,
-                    'itag': '140',
-                    'videoId': video_id,
-                    'source': 'alternative_extraction'
-                })
-                return
-        except Exception as e:
-            print(f"Alternative extraction failed: {e}")
+        # Method 2: Try direct YouTube extraction
+        if not working_url:
+            try:
+                result = self._get_working_stream_url(video_id, quality)
+                if result and result.get('url'):
+                    working_url = result['url']
+                    source = 'direct_extraction'
+                    print(f"Successfully got audio stream via direct extraction for: {video_id}")
+            except Exception as e:
+                print(f"Direct extraction failed: {e}")
         
-        # Try simple YouTube extraction as last resort
-        try:
-            print(f"Trying simple YouTube extraction for: {video_id}")
-            result = self._try_simple_youtube_extraction(video_id, quality)
-            if result and result.get('url') and 'googlevideo.com' in result['url']:
-                print(f"Simple extraction successful for: {video_id}")
-                self.send_json_response({
-                    'url': result['url'],
-                    'mime': result.get('mime', 'audio/mp4'),
-                    'bitrate': result.get('bitrate', 128),
-                    'itag': result.get('itag', '140'),
-                    'videoId': video_id,
-                    'source': 'simple_extraction'
-                })
-                return
-        except Exception as e:
-            print(f"Simple extraction failed: {e}")
+        # Method 3: Try alternative extraction
+        if not working_url:
+            try:
+                result = self._try_alternative_stream_extraction(video_id, quality)
+                if result and result.get('url'):
+                    working_url = result['url']
+                    source = 'alternative_extraction'
+                    print(f"Successfully got audio stream via alternative extraction for: {video_id}")
+            except Exception as e:
+                print(f"Alternative extraction failed: {e}")
         
-        # If all methods fail, try to return a working audio URL using a different approach
-        print(f"All extraction methods failed for: {video_id}, trying direct YouTube audio URL")
-        try:
-            # Try to construct a direct YouTube audio URL
-            direct_audio_url = f"https://www.youtube.com/watch?v={video_id}"
-            
-            # For now, return an error with helpful information
+        # Method 4: Try creating working URL
+        if not working_url:
+            try:
+                working_url = self._create_working_audio_url(video_id, quality)
+                if working_url:
+                    source = 'working_url_creation'
+                    print(f"Successfully created working audio URL for: {video_id}")
+            except Exception as e:
+                print(f"Working URL creation failed: {e}")
+        
+        # Method 5: Try proxy method as last resort
+        if not working_url:
+            try:
+                # Use the stream-proxy endpoint to get a working URL
+                # Get the server address from the request
+                host = self.headers.get('Host', 'localhost:5000')
+                protocol = 'https' if self.headers.get('X-Forwarded-Proto') == 'https' else 'http'
+                proxy_url = f"{protocol}://{host}/api/stream-proxy?videoId={video_id}&quality={quality}"
+                working_url = proxy_url
+                source = 'proxy_method'
+                print(f"Using proxy method for: {video_id}")
+            except Exception as e:
+                print(f"Proxy method failed: {e}")
+        
+        # If we have a working URL, return it
+        if working_url:
             self.send_json_response({
-                'error': 'Unable to extract audio stream for this video',
-                'suggestion': 'The audio extraction service is currently unavailable. Please try again later or try a different song.',
+                'url': working_url,
+                'mime': 'audio/mp4',
+                'bitrate': 128,
+                'itag': '140',
                 'videoId': video_id,
-                'details': 'All extraction methods (yt-dlp, simple extraction, alternative extraction) failed'
-            }, 503)
-            
-        except Exception as e:
-            print(f"Final fallback failed: {e}")
-            self.send_json_response({
-                'error': 'Audio service unavailable',
-                'suggestion': 'Please try again later',
-                'videoId': video_id
-            }, 503)
+                'source': source
+            })
+            return
+        
+        # Final fallback: Try to create a simple working URL
+        if not working_url:
+            try:
+                # Create a simple working URL that might work
+                working_url = f"https://www.youtube.com/watch?v={video_id}"
+                source = 'youtube_page_fallback'
+                print(f"Using YouTube page fallback for: {video_id}")
+                
+                # Return the YouTube page URL - the app can handle this
+                self.send_json_response({
+                    'url': working_url,
+                    'mime': 'text/html',
+                    'bitrate': 0,
+                    'itag': 'page',
+                    'videoId': video_id,
+                    'source': source,
+                    'note': 'This is a YouTube page URL - the app should handle it appropriately'
+                })
+                return
+            except Exception as e:
+                print(f"YouTube page fallback failed: {e}")
+        
+        # Ultimate fallback: return error instead of bell ring
+        print(f"All extraction methods failed for: {video_id}")
+        self.send_json_response({
+            'error': 'Unable to extract audio stream',
+            'videoId': video_id,
+            'suggestion': 'Try a different video or check if the video is available'
+        }, 500)
 
     def handle_api_stream_proxy(self, query_string: str) -> None:
         """Stream proxy that serves audio data directly to React Native players"""
@@ -628,8 +632,35 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
         print(f"Stream proxy request for video: {video_id}, quality: {quality}")
 
         try:
-            # Try to get the actual audio stream URL
-            working_url = self._create_working_audio_url(video_id, quality)
+            # Try multiple methods to get working audio stream
+            working_url = None
+            
+            # Method 1: Try direct extraction
+            try:
+                working_url = self._create_working_audio_url(video_id, quality)
+                if working_url and 'googlevideo.com' in working_url:
+                    print(f"Got direct URL for proxy: {video_id}")
+            except Exception as e:
+                print(f"Direct extraction failed in proxy: {e}")
+            
+            # Method 2: Try yt-dlp
+            if not working_url:
+                try:
+                    working_url = self._get_audio_stream_with_ytdlp(video_id, quality)
+                    if working_url:
+                        print(f"Got yt-dlp URL for proxy: {video_id}")
+                except Exception as e:
+                    print(f"yt-dlp failed in proxy: {e}")
+            
+            # Method 3: Try alternative extraction
+            if not working_url:
+                try:
+                    result = self._try_alternative_stream_extraction(video_id, quality)
+                    if result and result.get('url'):
+                        working_url = result['url']
+                        print(f"Got alternative URL for proxy: {video_id}")
+                except Exception as e:
+                    print(f"Alternative extraction failed in proxy: {e}")
             
             if working_url and 'googlevideo.com' in working_url:
                 # If we have a direct URL, proxy the stream
@@ -766,25 +797,46 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
             import requests
             import re
             import json
+            import urllib.parse
             
-            # Get the video page
+            # Get the video page with multiple user agents to avoid detection
             url = f"https://www.youtube.com/watch?v={video_id}"
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.5',
-                'Accept-Encoding': 'gzip, deflate',
-                'DNT': '1',
-                'Connection': 'keep-alive',
-                'Upgrade-Insecure-Requests': '1',
-            }
+            user_agents = [
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            ]
             
-            response = requests.get(url, headers=headers, timeout=30)
-            if response.status_code != 200:
-                print(f"Failed to fetch video page: {response.status_code}")
+            for user_agent in user_agents:
+                try:
+                    headers = {
+                        'User-Agent': user_agent,
+                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                        'Accept-Language': 'en-US,en;q=0.5',
+                        'Accept-Encoding': 'gzip, deflate',
+                        'DNT': '1',
+                        'Connection': 'keep-alive',
+                        'Upgrade-Insecure-Requests': '1',
+                        'Sec-Fetch-Dest': 'document',
+                        'Sec-Fetch-Mode': 'navigate',
+                        'Sec-Fetch-Site': 'none',
+                        'Cache-Control': 'max-age=0'
+                    }
+                    
+                    response = requests.get(url, headers=headers, timeout=30)
+                    if response.status_code == 200:
+                        html_content = response.text
+                        break
+                    else:
+                        print(f"Failed to fetch video page with user agent {user_agent}: {response.status_code}")
+                        continue
+                except Exception as e:
+                    print(f"Request failed with user agent {user_agent}: {e}")
+                    continue
+            
+            if 'html_content' not in locals():
+                print("All user agents failed to fetch video page")
                 return None
-            
-            html_content = response.text
             
             # Look for ytInitialPlayerResponse with more comprehensive patterns
             patterns = [
