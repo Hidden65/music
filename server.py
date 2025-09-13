@@ -187,12 +187,34 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
             
         super().__init__(*args, directory=ROOT_DIR, **kwargs)
 
+    def handle_api_health(self) -> None:
+        """Handle health check requests"""
+        try:
+            health_data = {
+                'status': 'healthy',
+                'timestamp': time.time(),
+                'ytmusic_available': YTMUSIC_AVAILABLE,
+                'ytmusic_initialized': self.ytmusic is not None,
+                'database_path': DB_PATH,
+                'remote_base_url': REMOTE_BASE_URL is not None
+            }
+            self.send_json_response(health_data)
+        except Exception as e:
+            self.send_json_response({
+                'status': 'unhealthy',
+                'error': str(e),
+                'timestamp': time.time()
+            }, 500)
+
     def do_GET(self):  # noqa: N802 (keep stdlib naming)
         parsed = urllib.parse.urlsplit(self.path)
         path = parsed.path
         
         # API routes
-        if path == '/api/search':
+        if path == '/api/health':
+            self.handle_api_health()
+            return
+        elif path == '/api/search':
             self.handle_api_search(parsed.query)
             return
         elif path == '/api/trending':
@@ -518,7 +540,7 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
 
         print(f"Stream request for video: {video_id}, quality: {quality}")
 
-        # Try to get a working audio stream URL using yt-dlp
+        # Try to get a working audio stream URL using yt-dlp first
         try:
             working_url = self._get_audio_stream_with_ytdlp(video_id, quality)
             if working_url:
@@ -535,17 +557,63 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
         except Exception as e:
             print(f"yt-dlp extraction failed: {e}")
         
-        # Fallback: return a working audio URL for testing
-        print(f"Using fallback audio URL for: {video_id}")
-        fallback_url = "https://www.soundjay.com/misc/sounds/bell-ringing-05.wav"
-        self.send_json_response({
-            'url': fallback_url,
-            'mime': 'audio/wav',
-            'bitrate': 128,
-            'itag': '140',
-            'videoId': video_id,
-            'source': 'fallback_test'
-        })
+        # Try alternative extraction methods
+        try:
+            print(f"Trying alternative extraction methods for: {video_id}")
+            result = self._create_working_audio_url(video_id, quality)
+            if result:
+                print(f"Alternative extraction successful for: {video_id}")
+                self.send_json_response({
+                    'url': result,
+                    'mime': 'audio/mp4',
+                    'bitrate': 128,
+                    'itag': '140',
+                    'videoId': video_id,
+                    'source': 'alternative_extraction'
+                })
+                return
+        except Exception as e:
+            print(f"Alternative extraction failed: {e}")
+        
+        # Try simple YouTube extraction as last resort
+        try:
+            print(f"Trying simple YouTube extraction for: {video_id}")
+            result = self._try_simple_youtube_extraction(video_id, quality)
+            if result and result.get('url') and 'googlevideo.com' in result['url']:
+                print(f"Simple extraction successful for: {video_id}")
+                self.send_json_response({
+                    'url': result['url'],
+                    'mime': result.get('mime', 'audio/mp4'),
+                    'bitrate': result.get('bitrate', 128),
+                    'itag': result.get('itag', '140'),
+                    'videoId': video_id,
+                    'source': 'simple_extraction'
+                })
+                return
+        except Exception as e:
+            print(f"Simple extraction failed: {e}")
+        
+        # If all methods fail, try to return a working audio URL using a different approach
+        print(f"All extraction methods failed for: {video_id}, trying direct YouTube audio URL")
+        try:
+            # Try to construct a direct YouTube audio URL
+            direct_audio_url = f"https://www.youtube.com/watch?v={video_id}"
+            
+            # For now, return an error with helpful information
+            self.send_json_response({
+                'error': 'Unable to extract audio stream for this video',
+                'suggestion': 'The audio extraction service is currently unavailable. Please try again later or try a different song.',
+                'videoId': video_id,
+                'details': 'All extraction methods (yt-dlp, simple extraction, alternative extraction) failed'
+            }, 503)
+            
+        except Exception as e:
+            print(f"Final fallback failed: {e}")
+            self.send_json_response({
+                'error': 'Audio service unavailable',
+                'suggestion': 'Please try again later',
+                'videoId': video_id
+            }, 503)
 
     def handle_api_stream_proxy(self, query_string: str) -> None:
         """Stream proxy that serves audio data directly to React Native players"""
