@@ -746,14 +746,73 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
                 pass
 
     def _get_audio_stream_with_ytdlp(self, video_id: str, quality: str) -> str:
-        """Get audio stream URL using yt-dlp with better error handling"""
+        """Get audio stream URL using yt-dlp with better error handling and cookies support"""
         try:
             import subprocess
             import json
             import time
+            import os
+            
+            # Check if cookies.txt exists
+            cookies_path = os.path.join(ROOT_DIR, 'cookies.txt')
+            has_cookies = os.path.exists(cookies_path)
+            
+            if has_cookies:
+                try:
+                    # Validate cookies file
+                    with open(cookies_path, 'r', encoding='utf-8') as f:
+                        cookies_content = f.read()
+                        if 'youtube.com' in cookies_content or 'music.youtube.com' in cookies_content:
+                            print(f"✅ Using cookies.txt for authentication: {cookies_path}")
+                        else:
+                            print(f"⚠️  cookies.txt found but may not contain YouTube cookies: {cookies_path}")
+                            has_cookies = False
+                except Exception as e:
+                    print(f"❌ Error reading cookies.txt: {e}")
+                    has_cookies = False
+            else:
+                print("ℹ️  No cookies.txt found - using anonymous access")
+                print("   💡 Tip: Export cookies from https://music.youtube.com for better reliability")
             
             # Try multiple yt-dlp configurations to handle rate limiting
-            yt_dlp_configs = [
+            yt_dlp_configs = []
+            
+            # Add cookies-based configs first if cookies are available
+            if has_cookies:
+                yt_dlp_configs.extend([
+                    # Cookies with basic config
+                    [
+                        'python', '-m', 'yt_dlp',
+                        '--get-url',
+                        '--format', 'bestaudio[ext=m4a]/bestaudio',
+                        '--cookies', cookies_path,
+                        '--no-warnings',
+                        f'https://www.youtube.com/watch?v={video_id}'
+                    ],
+                    # Cookies with user agent
+                    [
+                        'python', '-m', 'yt_dlp',
+                        '--get-url',
+                        '--format', 'bestaudio[ext=m4a]/bestaudio',
+                        '--cookies', cookies_path,
+                        '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                        '--no-warnings',
+                        f'https://www.youtube.com/watch?v={video_id}'
+                    ],
+                    # Cookies with extractor args
+                    [
+                        'python', '-m', 'yt_dlp',
+                        '--get-url',
+                        '--format', 'bestaudio',
+                        '--cookies', cookies_path,
+                        '--extractor-args', 'youtube:player_client=android',
+                        '--no-warnings',
+                        f'https://www.youtube.com/watch?v={video_id}'
+                    ]
+                ])
+            
+            # Add fallback configs (without cookies)
+            yt_dlp_configs.extend([
                 # Basic config
                 [
                     'python', '-m', 'yt_dlp',
@@ -771,7 +830,7 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
                     '--no-warnings',
                     f'https://www.youtube.com/watch?v={video_id}'
                 ],
-                # With cookies and different approach
+                # With extractor args
                 [
                     'python', '-m', 'yt_dlp',
                     '--get-url',
@@ -780,7 +839,7 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
                     '--no-warnings',
                     f'https://www.youtube.com/watch?v={video_id}'
                 ]
-            ]
+            ])
             
             for i, cmd in enumerate(yt_dlp_configs):
                 try:
@@ -1978,6 +2037,15 @@ if __name__ == '__main__':
     print(f"📡 Server starting on http://0.0.0.0:{port}")
     print(f"🔍 YTMusic API: {'✅ Available' if YTMUSIC_AVAILABLE else '❌ Not available (using demo mode)'}")
     print(f"💾 Database: SQLite ({DB_PATH})")
+    
+    # Check for cookies.txt
+    cookies_path = os.path.join(ROOT_DIR, 'cookies.txt')
+    if os.path.exists(cookies_path):
+        print(f"🍪 Authentication: ✅ cookies.txt found")
+    else:
+        print(f"🍪 Authentication: ⚠️  No cookies.txt - consider exporting from https://music.youtube.com")
+        print(f"   📖 See COOKIES_SETUP_GUIDE.md for instructions")
+    
     print("🚀 Ready to serve music!")
     
     try:
