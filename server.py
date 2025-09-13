@@ -50,8 +50,8 @@ class RateLimiter:
         while not self.can_make_request(key):
             time.sleep(1)
 
-# Global rate limiter instance
-rate_limiter = RateLimiter(max_requests=5, time_window=60)
+# Global rate limiter instance - more aggressive to avoid 429 errors
+rate_limiter = RateLimiter(max_requests=3, time_window=120)
 
 # Simple cache for stream URLs to reduce YouTube requests
 stream_cache = {}
@@ -564,11 +564,34 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
                 # Remove expired cache entry
                 del stream_cache[cache_key]
 
-        # Try to get a working audio stream URL using yt-dlp
+        # Try direct YouTube extraction first (bypasses yt-dlp issues)
+        try:
+            working_url = self._extract_direct_youtube_url(video_id, quality)
+            if working_url:
+                print(f"Successfully got direct audio stream for: {video_id}")
+                response_data = {
+                    'url': working_url,
+                    'mime': 'audio/mp4',
+                    'bitrate': 128,
+                    'itag': '140',
+                    'videoId': video_id,
+                    'source': 'direct_extraction'
+                }
+                # Cache the result
+                stream_cache[cache_key] = {
+                    'data': response_data,
+                    'timestamp': time.time()
+                }
+                self.send_json_response(response_data)
+                return
+        except Exception as e:
+            print(f"Direct extraction failed: {e}")
+        
+        # Fallback: try yt-dlp with anti-detection
         try:
             working_url = self._get_audio_stream_with_ytdlp(video_id, quality)
             if working_url:
-                print(f"Successfully got audio stream for: {video_id}")
+                print(f"Successfully got audio stream via yt-dlp for: {video_id}")
                 response_data = {
                     'url': working_url,
                     'mime': 'audio/mp4',
@@ -591,30 +614,57 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
         print(f"Using fallback method for: {video_id}")
         try:
             fallback_url = self._create_working_audio_url(video_id, quality)
-            if fallback_url:
-                self.send_json_response({
+            if fallback_url and 'googlevideo.com' in fallback_url:
+                print(f"Fallback method successful for: {video_id}")
+                response_data = {
                     'url': fallback_url,
                     'mime': 'audio/mp4',
                     'bitrate': 128,
                     'itag': '140',
                     'videoId': video_id,
                     'source': 'fallback_extraction'
-                })
+                }
+                # Cache the result
+                stream_cache[cache_key] = {
+                    'data': response_data,
+                    'timestamp': time.time()
+                }
+                self.send_json_response(response_data)
                 return
         except Exception as e:
             print(f"Fallback extraction failed: {e}")
         
-        # Final fallback: return a test audio URL
-        print(f"Using final fallback audio URL for: {video_id}")
-        fallback_url = "https://www.soundjay.com/misc/sounds/bell-ringing-05.wav"
+        # Try one more direct approach with different method
+        try:
+            print(f"Trying alternative direct extraction for: {video_id}")
+            alt_url = self._try_alternative_extraction(video_id, quality)
+            if alt_url:
+                print(f"Alternative extraction successful for: {video_id}")
+                response_data = {
+                    'url': alt_url,
+                    'mime': 'audio/mp4',
+                    'bitrate': 128,
+                    'itag': '140',
+                    'videoId': video_id,
+                    'source': 'alternative_extraction'
+                }
+                # Cache the result
+                stream_cache[cache_key] = {
+                    'data': response_data,
+                    'timestamp': time.time()
+                }
+                self.send_json_response(response_data)
+                return
+        except Exception as e:
+            print(f"Alternative extraction failed: {e}")
+        
+        # Final fallback: return error instead of invalid URL
+        print(f"All extraction methods failed for: {video_id}")
         self.send_json_response({
-            'url': fallback_url,
-            'mime': 'audio/wav',
-            'bitrate': 128,
-            'itag': '140',
+            'error': 'Unable to extract audio stream for this video. Please try a different song.',
             'videoId': video_id,
-            'source': 'final_fallback'
-        })
+            'source': 'all_methods_failed'
+        }, 503)
 
     def handle_api_stream_proxy(self, query_string: str) -> None:
         """Stream proxy that serves audio data directly to React Native players"""
@@ -745,42 +795,330 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
                 print(f"Failed to send error response: {e}")
                 pass
 
+    def _extract_direct_youtube_url(self, video_id: str, quality: str) -> str:
+        """Extract YouTube audio URL directly without yt-dlp"""
+        try:
+            import requests
+            import re
+            import json
+            import random
+            import time
+            
+            # Wait for rate limiter
+            rate_limiter.wait_if_needed(f"direct_{video_id}")
+            
+            # Multiple user agents to rotate
+            user_agents = [
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0',
+                'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15'
+            ]
+            
+            # Try different approaches
+            approaches = [
+                # Approach 1: Direct video page with mobile user agent
+                {
+                    'url': f'https://m.youtube.com/watch?v={video_id}',
+                    'headers': {
+                        'User-Agent': 'Mozilla/5.0 (Linux; Android 10; SM-G973F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
+                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                        'Accept-Language': 'en-US,en;q=0.5',
+                        'Accept-Encoding': 'gzip, deflate',
+                        'DNT': '1',
+                        'Connection': 'keep-alive',
+                        'Upgrade-Insecure-Requests': '1',
+                    }
+                },
+                # Approach 2: Desktop with random user agent
+                {
+                    'url': f'https://www.youtube.com/watch?v={video_id}',
+                    'headers': {
+                        'User-Agent': random.choice(user_agents),
+                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                        'Accept-Language': 'en-US,en;q=0.5',
+                        'Accept-Encoding': 'gzip, deflate',
+                        'DNT': '1',
+                        'Connection': 'keep-alive',
+                        'Upgrade-Insecure-Requests': '1',
+                        'Sec-Fetch-Dest': 'document',
+                        'Sec-Fetch-Mode': 'navigate',
+                        'Sec-Fetch-Site': 'none',
+                        'Cache-Control': 'max-age=0'
+                    }
+                },
+                # Approach 3: Embed page
+                {
+                    'url': f'https://www.youtube.com/embed/{video_id}',
+                    'headers': {
+                        'User-Agent': random.choice(user_agents),
+                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                        'Accept-Language': 'en-US,en;q=0.5',
+                        'Referer': 'https://www.youtube.com/',
+                    }
+                }
+            ]
+            
+            for i, approach in enumerate(approaches):
+                try:
+                    if i > 0:
+                        time.sleep(2)  # Delay between attempts
+                    
+                    print(f"Trying direct extraction approach {i+1} for: {video_id}")
+                    response = requests.get(approach['url'], headers=approach['headers'], timeout=15)
+                    
+                    if response.status_code == 200:
+                        # Look for player response in the HTML
+                        content = response.text
+                        
+                        # Pattern 1: Look for ytInitialPlayerResponse
+                        player_match = re.search(r'var ytInitialPlayerResponse = ({.+?});', content)
+                        if player_match:
+                            try:
+                                player_data = json.loads(player_match.group(1))
+                                return self._extract_audio_from_player_response(player_data, quality)
+                            except:
+                                pass
+                        
+                        # Pattern 2: Look for ytInitialData
+                        data_match = re.search(r'var ytInitialData = ({.+?});', content)
+                        if data_match:
+                            try:
+                                data = json.loads(data_match.group(1))
+                                return self._extract_audio_from_initial_data(data, quality)
+                            except:
+                                pass
+                        
+                        # Pattern 3: Look for streaming data in script tags
+                        script_matches = re.findall(r'<script[^>]*>(.*?)</script>', content, re.DOTALL)
+                        for script in script_matches:
+                            if 'googlevideo.com' in script and 'videoplayback' in script:
+                                urls = re.findall(r'https://[^"\']*googlevideo\.com[^"\']*videoplayback[^"\']*', script)
+                                if urls:
+                                    return self._select_best_audio_url(urls, quality)
+                    
+                except Exception as e:
+                    print(f"Direct extraction approach {i+1} failed: {e}")
+                    continue
+            
+            return None
+            
+        except Exception as e:
+            print(f"Direct extraction error: {e}")
+            return None
+    
+    def _extract_audio_from_player_response(self, player_data: dict, quality: str) -> str:
+        """Extract audio URL from YouTube player response"""
+        try:
+            streaming_data = player_data.get('streamingData', {})
+            formats = streaming_data.get('formats', [])
+            adaptive_formats = streaming_data.get('adaptiveFormats', [])
+            
+            # Combine all formats
+            all_formats = formats + adaptive_formats
+            
+            # Filter for audio formats
+            audio_formats = [f for f in all_formats if f.get('mimeType', '').startswith('audio/')]
+            
+            if audio_formats:
+                # Sort by quality preference
+                if quality == 'high':
+                    audio_formats.sort(key=lambda x: x.get('bitrate', 0), reverse=True)
+                else:
+                    audio_formats.sort(key=lambda x: x.get('bitrate', 0))
+                
+                best_format = audio_formats[0]
+                return best_format.get('url', '')
+            
+        except Exception as e:
+            print(f"Error extracting from player response: {e}")
+        
+        return None
+    
+    def _extract_audio_from_initial_data(self, data: dict, quality: str) -> str:
+        """Extract audio URL from YouTube initial data"""
+        try:
+            # Navigate through the complex data structure
+            contents = data.get('contents', {}).get('twoColumnWatchNextResults', {}).get('results', {}).get('results', {}).get('contents', [])
+            
+            for content in contents:
+                if 'videoPrimaryInfoRenderer' in content:
+                    # Look for streaming data in various places
+                    streaming_data = content.get('videoPrimaryInfoRenderer', {}).get('streamingData', {})
+                    if streaming_data:
+                        return self._extract_audio_from_player_response({'streamingData': streaming_data}, quality)
+        
+        except Exception as e:
+            print(f"Error extracting from initial data: {e}")
+        
+        return None
+    
+    def _select_best_audio_url(self, urls: list, quality: str) -> str:
+        """Select the best audio URL from a list"""
+        try:
+            # Filter for audio URLs
+            audio_urls = [url for url in urls if any(ext in url for ext in ['mime=audio', 'itag=140', 'itag=141', 'itag=251'])]
+            
+            if not audio_urls:
+                return urls[0] if urls else None
+            
+            # Sort by quality
+            if quality == 'high':
+                # Prefer higher bitrate formats
+                audio_urls.sort(key=lambda x: int(re.search(r'itag=(\d+)', x).group(1)) if re.search(r'itag=(\d+)', x) else 0, reverse=True)
+            else:
+                audio_urls.sort(key=lambda x: int(re.search(r'itag=(\d+)', x).group(1)) if re.search(r'itag=(\d+)', x) else 0)
+            
+            return audio_urls[0]
+            
+        except Exception as e:
+            print(f"Error selecting best audio URL: {e}")
+            return urls[0] if urls else None
+
+    def _try_alternative_extraction(self, video_id: str, quality: str) -> str:
+        """Try alternative extraction methods when primary methods fail"""
+        try:
+            import requests
+            import re
+            import time
+            
+            # Wait for rate limiter
+            rate_limiter.wait_if_needed(f"alt_{video_id}")
+            
+            # Try YouTube's get_video_info endpoint
+            try:
+                url = f"https://www.youtube.com/get_video_info?video_id={video_id}&el=detailpage&ps=default&eurl=&gl=US&hl=en"
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Accept': '*/*',
+                    'Accept-Language': 'en-US,en;q=0.9',
+                    'Referer': f'https://www.youtube.com/watch?v={video_id}',
+                }
+                
+                response = requests.get(url, headers=headers, timeout=10)
+                if response.status_code == 200:
+                    content = response.text
+                    
+                    # Parse the response
+                    import urllib.parse
+                    data = urllib.parse.parse_qs(content)
+                    
+                    if 'player_response' in data:
+                        player_response = json.loads(data['player_response'][0])
+                        return self._extract_audio_from_player_response(player_response, quality)
+                        
+            except Exception as e:
+                print(f"get_video_info method failed: {e}")
+            
+            # Try YouTube's player API
+            try:
+                url = f"https://www.youtube.com/youtubei/v1/player?key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Content-Type': 'application/json',
+                    'X-YouTube-Client-Name': '1',
+                    'X-YouTube-Client-Version': '2.20231219.04.00',
+                }
+                
+                payload = {
+                    "context": {
+                        "client": {
+                            "clientName": "WEB",
+                            "clientVersion": "2.20231219.04.00"
+                        }
+                    },
+                    "videoId": video_id
+                }
+                
+                response = requests.post(url, headers=headers, json=payload, timeout=10)
+                if response.status_code == 200:
+                    data = response.json()
+                    return self._extract_audio_from_player_response(data, quality)
+                    
+            except Exception as e:
+                print(f"YouTube player API method failed: {e}")
+            
+            # Try with different video ID formats
+            try:
+                # Sometimes YouTube uses different video ID formats
+                alt_video_id = video_id.replace('-', '_')
+                if alt_video_id != video_id:
+                    return self._extract_direct_youtube_url(alt_video_id, quality)
+                    
+            except Exception as e:
+                print(f"Alternative video ID method failed: {e}")
+            
+            return None
+            
+        except Exception as e:
+            print(f"Alternative extraction error: {e}")
+            return None
+
     def _get_audio_stream_with_ytdlp(self, video_id: str, quality: str) -> str:
-        """Get audio stream URL using yt-dlp with better error handling"""
+        """Get audio stream URL using yt-dlp with better error handling and anti-detection"""
         try:
             import subprocess
             import json
             import time
+            import random
             
-            # Try multiple yt-dlp configurations to handle rate limiting
+            # Wait for rate limiter
+            rate_limiter.wait_if_needed(f"ytdlp_{video_id}")
+            
+            # Try multiple yt-dlp configurations with anti-detection measures
             yt_dlp_configs = [
-                # Basic config
+                # Android client with mobile user agent
                 [
                     'python', '-m', 'yt_dlp',
                     '--get-url',
                     '--format', 'bestaudio[ext=m4a]/bestaudio',
-                    '--no-warnings',
-                    f'https://www.youtube.com/watch?v={video_id}'
-                ],
-                # With user agent
-                [
-                    'python', '-m', 'yt_dlp',
-                    '--get-url',
-                    '--format', 'bestaudio[ext=m4a]/bestaudio',
-                    '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                    '--no-warnings',
-                    f'https://www.youtube.com/watch?v={video_id}'
-                ],
-                # With cookies and different approach
-                [
-                    'python', '-m', 'yt_dlp',
-                    '--get-url',
-                    '--format', 'bestaudio',
+                    '--user-agent', 'com.google.android.youtube/17.36.4 (Linux; U; Android 11) gzip',
                     '--extractor-args', 'youtube:player_client=android',
                     '--no-warnings',
+                    '--no-check-certificate',
+                    f'https://www.youtube.com/watch?v={video_id}'
+                ],
+                # iOS client
+                [
+                    'python', '-m', 'yt_dlp',
+                    '--get-url',
+                    '--format', 'bestaudio[ext=m4a]/bestaudio',
+                    '--user-agent', 'com.google.ios.youtube/17.33.2 (iPhone14,3; U; CPU iOS 15_6 like Mac OS X)',
+                    '--extractor-args', 'youtube:player_client=ios',
+                    '--no-warnings',
+                    '--no-check-certificate',
+                    f'https://www.youtube.com/watch?v={video_id}'
+                ],
+                # TV client
+                [
+                    'python', '-m', 'yt_dlp',
+                    '--get-url',
+                    '--format', 'bestaudio[ext=m4a]/bestaudio',
+                    '--user-agent', 'Mozilla/5.0 (Linux; Tizen 2.3) AppleWebKit/538.1 (KHTML, like Gecko) Version/2.3 TV Safari/538.1',
+                    '--extractor-args', 'youtube:player_client=tv_embedded',
+                    '--no-warnings',
+                    '--no-check-certificate',
+                    f'https://www.youtube.com/watch?v={video_id}'
+                ],
+                # Web client with random user agent
+                [
+                    'python', '-m', 'yt_dlp',
+                    '--get-url',
+                    '--format', 'bestaudio[ext=m4a]/bestaudio',
+                    '--user-agent', random.choice([
+                        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                    ]),
+                    '--no-warnings',
+                    '--no-check-certificate',
                     f'https://www.youtube.com/watch?v={video_id}'
                 ]
             ]
+            
+            # Shuffle configs to avoid patterns
+            random.shuffle(yt_dlp_configs)
             
             for i, cmd in enumerate(yt_dlp_configs):
                 try:
