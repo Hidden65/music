@@ -564,8 +564,54 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
                 # Remove expired cache entry
                 del stream_cache[cache_key]
 
-        # ALWAYS use stream proxy as the primary method to handle access restrictions
-        print(f"🔄 Using stream proxy for: {video_id}")
+        # Try to get a working audio URL directly first
+        print(f"🔧 Attempting direct audio URL extraction for: {video_id}")
+        try:
+            # Method 1: Try YouTube API extraction
+            api_result = self._try_youtube_api_extraction(video_id, quality)
+            if api_result and api_result.get('url') and 'googlevideo.com' in api_result['url']:
+                print(f"✅ Got direct audio URL from YouTube API for: {video_id}")
+                response_data = {
+                    'url': api_result['url'],
+                    'mime': api_result.get('mime', 'audio/mp4'),
+                    'bitrate': api_result.get('bitrate', 128),
+                    'itag': api_result.get('itag', '140'),
+                    'videoId': video_id,
+                    'source': 'youtube_api_direct'
+                }
+                # Cache the result
+                stream_cache[cache_key] = {
+                    'data': response_data,
+                    'timestamp': time.time()
+                }
+                self.send_json_response(response_data)
+                return
+            
+            # Method 2: Try simple extraction
+            simple_result = self._try_simple_youtube_extraction(video_id, quality)
+            if simple_result and simple_result.get('url') and 'googlevideo.com' in simple_result['url']:
+                print(f"✅ Got direct audio URL from simple extraction for: {video_id}")
+                response_data = {
+                    'url': simple_result['url'],
+                    'mime': simple_result.get('mime', 'audio/mp4'),
+                    'bitrate': simple_result.get('bitrate', 128),
+                    'itag': simple_result.get('itag', '140'),
+                    'videoId': video_id,
+                    'source': 'simple_extraction_direct'
+                }
+                # Cache the result
+                stream_cache[cache_key] = {
+                    'data': response_data,
+                    'timestamp': time.time()
+                }
+                self.send_json_response(response_data)
+                return
+                
+        except Exception as e:
+            print(f"❌ Direct URL extraction failed for {video_id}: {e}")
+        
+        # Fallback: Use stream proxy if direct URLs don't work
+        print(f"🔄 Using stream proxy as fallback for: {video_id}")
         try:
             # Get the host from the request headers
             host = self.headers.get('Host', 'localhost:5000')
@@ -584,7 +630,7 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
                 'bitrate': 128,
                 'itag': '140',
                 'videoId': video_id,
-                'source': 'stream_proxy'
+                'source': 'stream_proxy_fallback'
             }
             # Cache the result
             stream_cache[cache_key] = {
@@ -698,29 +744,148 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
         print(f"🔄 Stream proxy request for video: {video_id}, quality: {quality}")
 
         try:
-            # Try to get the actual audio stream URL
-            working_url = self._create_working_audio_url(video_id, quality)
+            # Try multiple methods to get audio stream
+            audio_url = None
             
-            if working_url and 'googlevideo.com' in working_url:
-                # If we have a direct URL, proxy the stream
-                print(f"📡 Proxying stream for video: {video_id}")
-                self._proxy_audio_stream(working_url)
+            # Method 1: Try YouTube API extraction
+            print(f"🔧 Trying YouTube API extraction for: {video_id}")
+            api_result = self._try_youtube_api_extraction(video_id, quality)
+            if api_result and api_result.get('url') and 'googlevideo.com' in api_result['url']:
+                audio_url = api_result['url']
+                print(f"✅ Got audio URL from YouTube API: {audio_url[:100]}...")
+            
+            # Method 2: Try simple extraction if API failed
+            if not audio_url:
+                print(f"🔧 Trying simple extraction for: {video_id}")
+                simple_result = self._try_simple_youtube_extraction(video_id, quality)
+                if simple_result and simple_result.get('url') and 'googlevideo.com' in simple_result['url']:
+                    audio_url = simple_result['url']
+                    print(f"✅ Got audio URL from simple extraction: {audio_url[:100]}...")
+            
+            # Method 3: Try yt-dlp if other methods failed
+            if not audio_url:
+                print(f"🔧 Trying yt-dlp for: {video_id}")
+                ytdlp_url = self._get_audio_stream_with_ytdlp(video_id, quality)
+                if ytdlp_url and 'googlevideo.com' in ytdlp_url:
+                    audio_url = ytdlp_url
+                    print(f"✅ Got audio URL from yt-dlp: {audio_url[:100]}...")
+            
+            if audio_url:
+                # Proxy the audio stream
+                print(f"📡 Proxying audio stream for: {video_id}")
+                self._proxy_audio_stream_direct(audio_url)
             else:
-                # If we can't get a direct URL, try to use yt-dlp as fallback
-                print(f"🔧 Attempting yt-dlp fallback for video: {video_id}")
-                self._proxy_audio_with_ytdlp(video_id, quality)
+                print(f"❌ No audio URL found for: {video_id}")
+                self.send_json_response({
+                    'error': 'No audio stream available for this video',
+                    'videoId': video_id,
+                    'source': 'no_stream_found'
+                })
                 
         except Exception as e:
             print(f"💥 Stream proxy error for {video_id}: {e}")
-            # Return JSON response instead of sending error to avoid broken pipe
+            import traceback
+            traceback.print_exc()
+            self.send_json_response({
+                'error': f'Stream proxy error: {str(e)}',
+                'videoId': video_id,
+                'source': 'stream_proxy_error'
+            })
+
+    def _proxy_audio_stream_direct(self, stream_url: str) -> None:
+        """Direct audio stream proxy that works like YouTube Music"""
+        try:
+            import requests
+            
+            print(f"🎵 Fetching audio stream: {stream_url[:100]}...")
+            
+            # Use multiple user agents and headers to bypass restrictions
+            user_agents = [
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1',
+                'Mozilla/5.0 (Android 10; Mobile; rv:109.0) Gecko/109.0 Firefox/109.0'
+            ]
+            
+            response = None
+            for i, user_agent in enumerate(user_agents):
+                try:
+                    headers = {
+                        'User-Agent': user_agent,
+                        'Accept': 'audio/*,*/*;q=0.8',
+                        'Accept-Encoding': 'identity',
+                        'Range': 'bytes=0-',
+                        'Referer': 'https://www.youtube.com/',
+                        'Origin': 'https://www.youtube.com',
+                        'Connection': 'keep-alive'
+                    }
+                    
+                    print(f"🔧 Trying user agent {i+1}...")
+                    response = requests.get(stream_url, headers=headers, stream=True, timeout=30)
+                    
+                    if response.status_code in [200, 206]:
+                        print(f"✅ Successfully connected with user agent {i+1}")
+                        break
+                    elif response.status_code == 403:
+                        print(f"❌ Access denied with user agent {i+1}, trying next...")
+                        continue
+                    else:
+                        print(f"❌ Failed with user agent {i+1}: {response.status_code}")
+                        continue
+                        
+                except Exception as e:
+                    print(f"❌ Error with user agent {i+1}: {e}")
+                    continue
+            
+            if not response or response.status_code not in [200, 206]:
+                print(f"💥 All user agents failed to access stream")
+                self.send_error(403, 'Access denied to audio stream')
+                return
+            
+            # Send proper audio headers
+            self.send_response(200)
+            self.send_header('Content-Type', 'audio/mp4')
+            self.send_header('Accept-Ranges', 'bytes')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.send_header('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS')
+            self.send_header('Access-Control-Allow-Headers', 'Range, Content-Range, Content-Length')
+            self.send_header('Cache-Control', 'no-cache')
+            
+            # Copy relevant headers from the original response
+            if 'content-length' in response.headers:
+                self.send_header('Content-Length', response.headers['content-length'])
+            if 'content-range' in response.headers:
+                self.send_header('Content-Range', response.headers['content-range'])
+            if 'content-type' in response.headers:
+                self.send_header('Content-Type', response.headers['content-type'])
+            
+            self.end_headers()
+            
+            # Stream the audio data
             try:
-                self.send_json_response({
-                    'error': f'Stream proxy error: {str(e)}',
-                    'videoId': video_id,
-                    'source': 'stream_proxy_error'
-                })
+                bytes_sent = 0
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        self.wfile.write(chunk)
+                        self.wfile.flush()
+                        bytes_sent += len(chunk)
+                        if bytes_sent % (1024 * 1024) == 0:  # Log every MB
+                            print(f"📡 Streamed {bytes_sent // (1024 * 1024)} MB")
+                            
+            except (BrokenPipeError, ConnectionResetError) as e:
+                print(f"Client disconnected during stream: {e}")
+                return
+                
+        except (BrokenPipeError, ConnectionResetError) as e:
+            print(f"Client disconnected: {e}")
+            return
+        except Exception as e:
+            print(f"Direct proxy stream error: {e}")
+            import traceback
+            traceback.print_exc()
+            try:
+                self.send_error(500, f'Proxy error: {str(e)}')
             except:
-                # If even JSON response fails, just log and continue
                 print(f"Failed to send error response: {e}")
                 pass
 
