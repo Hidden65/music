@@ -564,14 +564,44 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
                 # Remove expired cache entry
                 del stream_cache[cache_key]
 
-        # For deployment environments, prioritize YouTube API extraction over yt-dlp
-        # as yt-dlp may not be available or working properly in cloud environments
+        # ALWAYS use stream proxy as the primary method to handle access restrictions
+        print(f"🔄 Using stream proxy for: {video_id}")
+        try:
+            # Get the host from the request headers
+            host = self.headers.get('Host', 'localhost:5000')
+            if 'music-h3vv.onrender.com' in host:
+                # Use HTTPS for Render deployment
+                proxy_url = f"https://{host}/api/stream-proxy?videoId={video_id}&quality={quality}"
+            else:
+                # Use HTTP for local development
+                proxy_url = f"http://{host}/api/stream-proxy?videoId={video_id}&quality={quality}"
+            
+            print(f"✅ Using stream proxy URL for: {video_id}")
+            print(f"🔗 Proxy URL: {proxy_url}")
+            response_data = {
+                'url': proxy_url,
+                'mime': 'audio/mp4',
+                'bitrate': 128,
+                'itag': '140',
+                'videoId': video_id,
+                'source': 'stream_proxy'
+            }
+            # Cache the result
+            stream_cache[cache_key] = {
+                'data': response_data,
+                'timestamp': time.time()
+            }
+            self.send_json_response(response_data)
+            return
+        except Exception as e:
+            print(f"❌ Stream proxy failed for {video_id}: {e}")
+        
+        # Fallback: Try YouTube API extraction for deployment environments
         import os
         is_deployment = os.environ.get('RENDER') or os.environ.get('HEROKU') or os.environ.get('VERCEL')
         
         if is_deployment:
-            print(f"🌐 Deployment environment detected, prioritizing YouTube API extraction for: {video_id}")
-            # Try YouTube API extraction first in deployment
+            print(f"🌐 Deployment environment detected, trying YouTube API extraction for: {video_id}")
             try:
                 api_result = self._try_youtube_api_extraction(video_id, quality)
                 if api_result and api_result.get('url') and 'googlevideo.com' in api_result['url']:
@@ -665,7 +695,7 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
             self.send_error(400, 'Video ID required')
             return
 
-        print(f"Stream proxy request for video: {video_id}, quality: {quality}")
+        print(f"🔄 Stream proxy request for video: {video_id}, quality: {quality}")
 
         try:
             # Try to get the actual audio stream URL
@@ -673,15 +703,15 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
             
             if working_url and 'googlevideo.com' in working_url:
                 # If we have a direct URL, proxy the stream
-                print(f"Proxying stream for video: {video_id}")
+                print(f"📡 Proxying stream for video: {video_id}")
                 self._proxy_audio_stream(working_url)
             else:
                 # If we can't get a direct URL, try to use yt-dlp as fallback
-                print(f"Attempting yt-dlp fallback for video: {video_id}")
+                print(f"🔧 Attempting yt-dlp fallback for video: {video_id}")
                 self._proxy_audio_with_ytdlp(video_id, quality)
                 
         except Exception as e:
-            print(f"Stream proxy error for {video_id}: {e}")
+            print(f"💥 Stream proxy error for {video_id}: {e}")
             # Return JSON response instead of sending error to avoid broken pipe
             try:
                 self.send_json_response({
@@ -699,44 +729,73 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
         try:
             import requests
             
-            # Get the audio stream
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'audio/*,*/*;q=0.8',
-                'Accept-Encoding': 'identity',
-                'Range': 'bytes=0-',
-            }
+            # Get the audio stream with multiple user agents to handle access issues
+            user_agents = [
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1',
+                'Mozilla/5.0 (Android 10; Mobile; rv:109.0) Gecko/109.0 Firefox/109.0'
+            ]
             
-            response = requests.get(stream_url, headers=headers, stream=True, timeout=30)
-            
-            if response.status_code in [200, 206]:
-                # Send headers
-                self.send_response(200)
-                self.send_header('Content-Type', 'audio/mp4')
-                self.send_header('Accept-Ranges', 'bytes')
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.send_header('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS')
-                self.send_header('Access-Control-Allow-Headers', 'Range, Content-Range, Content-Length')
-                
-                if 'content-length' in response.headers:
-                    self.send_header('Content-Length', response.headers['content-length'])
-                if 'content-range' in response.headers:
-                    self.send_header('Content-Range', response.headers['content-range'])
-                
-                self.end_headers()
-                
-                # Stream the audio data with error handling
+            response = None
+            for i, user_agent in enumerate(user_agents):
                 try:
-                    for chunk in response.iter_content(chunk_size=8192):
-                        if chunk:
-                            self.wfile.write(chunk)
-                            self.wfile.flush()
-                except (BrokenPipeError, ConnectionResetError) as e:
-                    print(f"Client disconnected during stream: {e}")
-                    return
-            else:
-                print(f"Failed to fetch audio stream: {response.status_code}")
-                self.send_error(response.status_code, 'Failed to fetch audio stream')
+                    headers = {
+                        'User-Agent': user_agent,
+                        'Accept': 'audio/*,*/*;q=0.8',
+                        'Accept-Encoding': 'identity',
+                        'Range': 'bytes=0-',
+                        'Referer': 'https://www.youtube.com/',
+                        'Origin': 'https://www.youtube.com'
+                    }
+                    
+                    print(f"🔧 Trying user agent {i+1} for stream: {stream_url[:100]}...")
+                    response = requests.get(stream_url, headers=headers, stream=True, timeout=30)
+                    
+                    if response.status_code in [200, 206]:
+                        print(f"✅ Successfully connected with user agent {i+1}")
+                        break
+                    elif response.status_code == 403:
+                        print(f"❌ Access denied with user agent {i+1}, trying next...")
+                        continue
+                    else:
+                        print(f"❌ Failed with user agent {i+1}: {response.status_code}")
+                        continue
+                        
+                except Exception as e:
+                    print(f"❌ Error with user agent {i+1}: {e}")
+                    continue
+            
+            if not response or response.status_code not in [200, 206]:
+                print(f"💥 All user agents failed to access stream")
+                self.send_error(403, 'Access denied to audio stream')
+                return
+            
+            # Send headers
+            self.send_response(200)
+            self.send_header('Content-Type', 'audio/mp4')
+            self.send_header('Accept-Ranges', 'bytes')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.send_header('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS')
+            self.send_header('Access-Control-Allow-Headers', 'Range, Content-Range, Content-Length')
+            
+            if 'content-length' in response.headers:
+                self.send_header('Content-Length', response.headers['content-length'])
+            if 'content-range' in response.headers:
+                self.send_header('Content-Range', response.headers['content-range'])
+            
+            self.end_headers()
+            
+            # Stream the audio data with error handling
+            try:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        self.wfile.write(chunk)
+                        self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError) as e:
+                print(f"Client disconnected during stream: {e}")
+                return
                 
         except (BrokenPipeError, ConnectionResetError) as e:
             print(f"Client disconnected: {e}")
