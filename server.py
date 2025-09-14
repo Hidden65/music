@@ -564,11 +564,11 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
                 # Remove expired cache entry
                 del stream_cache[cache_key]
 
-        # Try to get a working audio stream URL using yt-dlp
+        # Try to get a working audio stream URL using yt-dlp first
         try:
             working_url = self._get_audio_stream_with_ytdlp(video_id, quality)
-            if working_url:
-                print(f"Successfully got audio stream for: {video_id}")
+            if working_url and working_url.startswith('http') and 'googlevideo.com' in working_url:
+                print(f"Successfully got audio stream via yt-dlp for: {video_id}")
                 response_data = {
                     'url': working_url,
                     'mime': 'audio/mp4',
@@ -591,29 +591,33 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
         print(f"Using fallback method for: {video_id}")
         try:
             fallback_url = self._create_working_audio_url(video_id, quality)
-            if fallback_url:
-                self.send_json_response({
+            if fallback_url and fallback_url.startswith('http') and 'googlevideo.com' in fallback_url:
+                print(f"Successfully got audio stream via fallback for: {video_id}")
+                response_data = {
                     'url': fallback_url,
                     'mime': 'audio/mp4',
                     'bitrate': 128,
                     'itag': '140',
                     'videoId': video_id,
                     'source': 'fallback_extraction'
-                })
+                }
+                # Cache the result
+                stream_cache[cache_key] = {
+                    'data': response_data,
+                    'timestamp': time.time()
+                }
+                self.send_json_response(response_data)
                 return
         except Exception as e:
             print(f"Fallback extraction failed: {e}")
         
-        # Final fallback: return a test audio URL
-        print(f"Using final fallback audio URL for: {video_id}")
-        fallback_url = "https://www.soundjay.com/misc/sounds/bell-ringing-05.wav"
+        # Final fallback: return error instead of invalid URL
+        print(f"All extraction methods failed for: {video_id}")
         self.send_json_response({
-            'url': fallback_url,
-            'mime': 'audio/wav',
-            'bitrate': 128,
-            'itag': '140',
+            'error': 'Unable to extract audio stream for this video',
             'videoId': video_id,
-            'source': 'final_fallback'
+            'suggestion': 'Try a different video or check if the video is available',
+            'source': 'all_methods_failed'
         })
 
     def handle_api_stream_proxy(self, query_string: str) -> None:
@@ -754,30 +758,43 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
             
             # Try multiple yt-dlp configurations to handle rate limiting
             yt_dlp_configs = [
-                # Basic config
+                # Basic config with best audio format
                 [
                     'python', '-m', 'yt_dlp',
                     '--get-url',
-                    '--format', 'bestaudio[ext=m4a]/bestaudio',
+                    '--format', 'bestaudio[ext=m4a]/bestaudio[ext=mp4]/bestaudio',
                     '--no-warnings',
+                    '--no-check-certificate',
                     f'https://www.youtube.com/watch?v={video_id}'
                 ],
-                # With user agent
+                # With user agent and different format
                 [
                     'python', '-m', 'yt_dlp',
                     '--get-url',
                     '--format', 'bestaudio[ext=m4a]/bestaudio',
-                    '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                     '--no-warnings',
+                    '--no-check-certificate',
                     f'https://www.youtube.com/watch?v={video_id}'
                 ],
                 # With cookies and different approach
                 [
                     'python', '-m', 'yt_dlp',
                     '--get-url',
-                    '--format', 'bestaudio',
+                    '--format', 'bestaudio[ext=m4a]/bestaudio',
                     '--extractor-args', 'youtube:player_client=android',
                     '--no-warnings',
+                    '--no-check-certificate',
+                    f'https://www.youtube.com/watch?v={video_id}'
+                ],
+                # Alternative with different extractor
+                [
+                    'python', '-m', 'yt_dlp',
+                    '--get-url',
+                    '--format', 'bestaudio',
+                    '--extractor-args', 'youtube:player_client=web',
+                    '--no-warnings',
+                    '--no-check-certificate',
                     f'https://www.youtube.com/watch?v={video_id}'
                 ]
             ]
@@ -786,13 +803,20 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
                 try:
                     if i > 0:
                         # Add delay between attempts
-                        time.sleep(3 + i)
+                        time.sleep(2 + i)
                     
-                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=45)
+                    print(f"Trying yt-dlp config {i+1} for {video_id}")
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                    
                     if result.returncode == 0 and result.stdout.strip():
                         url = result.stdout.strip()
-                        print(f"yt-dlp extracted URL for {video_id} with config {i+1}: {url}")
-                        return url
+                        # Validate the URL
+                        if url.startswith('http') and ('googlevideo.com' in url or 'youtube.com' in url):
+                            print(f"yt-dlp extracted valid URL for {video_id} with config {i+1}: {url[:100]}...")
+                            return url
+                        else:
+                            print(f"yt-dlp config {i+1} returned invalid URL: {url}")
+                            continue
                     else:
                         print(f"yt-dlp config {i+1} failed for {video_id}: {result.stderr}")
                         continue
@@ -818,21 +842,39 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
         try:
             print(f"Creating working audio URL for: {video_id}")
             
-            # Try to extract actual audio stream URL using simple extraction
-            print(f"Trying simple extraction for: {video_id}")
-            result = self._try_simple_youtube_extraction(video_id, quality)
-            print(f"Simple extraction result for {video_id}: {result}")
-            if result and result.get('url') and 'googlevideo.com' in result['url']:
-                print(f"Successfully extracted audio URL for: {video_id}")
-                return result['url']
+            # Try multiple extraction methods in order of reliability
+            extraction_methods = [
+                ("YouTube API extraction", self._try_youtube_api_extraction),
+                ("Simple YouTube extraction", self._try_simple_youtube_extraction),
+                ("Alternative extraction", self._try_alternative_extraction),
+            ]
             
-            # If extraction fails, try alternative method
-            print(f"Primary extraction failed for: {video_id}, trying alternative method")
-            alternative_result = self._try_alternative_extraction(video_id, quality)
-            print(f"Alternative extraction result for {video_id}: {alternative_result}")
-            if alternative_result and alternative_result.get('url') and 'googlevideo.com' in alternative_result['url']:
-                print(f"Alternative extraction successful for: {video_id}")
-                return alternative_result['url']
+            for method_name, method_func in extraction_methods:
+                try:
+                    print(f"Trying {method_name} for: {video_id}")
+                    result = method_func(video_id, quality)
+                    
+                    if result and result.get('url'):
+                        url = result['url']
+                        print(f"{method_name} result for {video_id}: {url[:100]}...")
+                        
+                        # Validate the URL
+                        if (url.startswith('http') and 
+                            ('googlevideo.com' in url or 'youtube.com' in url) and
+                            not url.endswith('.html') and
+                            not 'watch?v=' in url):
+                            print(f"Successfully extracted audio URL using {method_name} for: {video_id}")
+                            return url
+                        else:
+                            print(f"Invalid URL from {method_name}: {url}")
+                            continue
+                    else:
+                        print(f"{method_name} returned no valid result for: {video_id}")
+                        continue
+                        
+                except Exception as e:
+                    print(f"{method_name} failed for {video_id}: {e}")
+                    continue
             
             print(f"All extraction methods failed for: {video_id}")
             return None
@@ -861,6 +903,7 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
                 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:109.0) Gecko/20100101 Firefox/121.0'
             ]
             
+            response = None
             # Try with different user agents and add delays
             for i, user_agent in enumerate(user_agents):
                 try:
@@ -900,7 +943,7 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
                     print(f"Request failed with user agent {i+1}: {e}")
                     continue
             
-            if response.status_code != 200:
+            if not response or response.status_code != 200:
                 print(f"All user agents failed to fetch video page")
                 return None
             
@@ -972,9 +1015,15 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
                 print("No valid audio format found")
                 return None
             
+            # Validate the URL before returning
+            stream_url = best_format['url']
+            if not stream_url.startswith('http') or 'googlevideo.com' not in stream_url:
+                print(f"Invalid stream URL format: {stream_url}")
+                return None
+            
             # Return the stream data
             return {
-                'url': best_format['url'],
+                'url': stream_url,
                 'mime': best_format.get('mimeType', 'audio/mp4'),
                 'bitrate': best_format.get('bitrate', 128),
                 'itag': best_format.get('itag', '140'),
@@ -1106,6 +1155,84 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
             
         except Exception as e:
             print(f"Alternative extraction failed: {e}")
+            return None
+
+    def _try_youtube_api_extraction(self, video_id: str, quality: str) -> dict:
+        """Try to extract audio using YouTube's internal API"""
+        try:
+            print(f"Trying YouTube API extraction for: {video_id}")
+            import requests
+            import json
+            
+            # Try to get video info using YouTube's internal API
+            api_url = f"https://www.youtube.com/youtubei/v1/player"
+            
+            # Use a working client key
+            client_data = {
+                "context": {
+                    "client": {
+                        "clientName": "WEB",
+                        "clientVersion": "2.20231219.01.00"
+                    }
+                },
+                "videoId": video_id
+            }
+            
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Content-Type': 'application/json',
+                'Accept': 'application/json',
+            }
+            
+            response = requests.post(api_url, json=client_data, headers=headers, timeout=30)
+            
+            if response.status_code == 200:
+                data = response.json()
+                
+                # Extract streaming data
+                streaming_data = data.get('streamingData', {})
+                if streaming_data:
+                    adaptive_formats = streaming_data.get('adaptiveFormats', [])
+                    
+                    # Filter for audio-only formats
+                    audio_formats = []
+                    for fmt in adaptive_formats:
+                        mime_type = fmt.get('mimeType', '')
+                        if mime_type.startswith('audio/'):
+                            audio_formats.append(fmt)
+                    
+                    if audio_formats:
+                        # Choose best quality
+                        quality_map = {'high': 192, 'medium': 128, 'low': 96}
+                        target_bitrate = quality_map.get(quality, 128)
+                        
+                        best_format = None
+                        best_diff = float('inf')
+                        
+                        for fmt in audio_formats:
+                            bitrate = fmt.get('bitrate', 0)
+                            diff = abs(bitrate - target_bitrate)
+                            if diff < best_diff:
+                                best_format = fmt
+                                best_diff = diff
+                        
+                        if best_format and best_format.get('url'):
+                            stream_url = best_format['url']
+                            if stream_url.startswith('http') and 'googlevideo.com' in stream_url:
+                                return {
+                                    'url': stream_url,
+                                    'mime': best_format.get('mimeType', 'audio/mp4'),
+                                    'bitrate': best_format.get('bitrate', 128),
+                                    'itag': best_format.get('itag', '140'),
+                                    'videoId': video_id,
+                                    'source': 'youtube_api_extraction'
+                                }
+            
+            print(f"YouTube API extraction failed for: {video_id}")
+            return None
+            
+        except Exception as e:
+            print(f"YouTube API extraction failed: {e}")
             return None
 
     def _get_working_stream_url(self, video_id: str, quality: str) -> dict:
