@@ -564,51 +564,33 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
                 # Remove expired cache entry
                 del stream_cache[cache_key]
 
-        # Try to get a working audio URL directly first
-        print(f"🔧 Attempting direct audio URL extraction for: {video_id}")
-        try:
-            # Method 1: Try YouTube API extraction
-            api_result = self._try_youtube_api_extraction(video_id, quality)
-            if api_result and api_result.get('url') and 'googlevideo.com' in api_result['url']:
-                print(f"✅ Got direct audio URL from YouTube API for: {video_id}")
-                response_data = {
-                    'url': api_result['url'],
-                    'mime': api_result.get('mime', 'audio/mp4'),
-                    'bitrate': api_result.get('bitrate', 128),
-                    'itag': api_result.get('itag', '140'),
-                    'videoId': video_id,
-                    'source': 'youtube_api_direct'
-                }
-                # Cache the result
-                stream_cache[cache_key] = {
-                    'data': response_data,
-                    'timestamp': time.time()
-                }
-                self.send_json_response(response_data)
-                return
-            
-            # Method 2: Try simple extraction
-            simple_result = self._try_simple_youtube_extraction(video_id, quality)
-            if simple_result and simple_result.get('url') and 'googlevideo.com' in simple_result['url']:
-                print(f"✅ Got direct audio URL from simple extraction for: {video_id}")
-                response_data = {
-                    'url': simple_result['url'],
-                    'mime': simple_result.get('mime', 'audio/mp4'),
-                    'bitrate': simple_result.get('bitrate', 128),
-                    'itag': simple_result.get('itag', '140'),
-                    'videoId': video_id,
-                    'source': 'simple_extraction_direct'
-                }
-                # Cache the result
-                stream_cache[cache_key] = {
-                    'data': response_data,
-                    'timestamp': time.time()
-                }
-                self.send_json_response(response_data)
-                return
-                
-        except Exception as e:
-            print(f"❌ Direct URL extraction failed for {video_id}: {e}")
+        # SIMPLE SOLUTION: Return YouTube video URL for direct playback
+        print(f"🎬 Returning YouTube video URL for direct playback: {video_id}")
+        youtube_url = f"https://www.youtube.com/watch?v={video_id}"
+        embed_url = f"https://www.youtube.com/embed/{video_id}?autoplay=1&controls=1&showinfo=0&rel=0&modestbranding=1"
+        
+        response_data = {
+            'url': youtube_url,
+            'embed_url': embed_url,
+            'type': 'youtube_video',
+            'videoId': video_id,
+            'source': 'youtube_direct',
+            'supports_background': True,
+            'supports_notifications': True,
+            'mime': 'video/mp4',
+            'bitrate': 128,
+            'itag': '140'
+        }
+        
+        # Cache the result
+        stream_cache[cache_key] = {
+            'data': response_data,
+            'timestamp': time.time()
+        }
+        
+        print(f"✅ Returning YouTube video URL: {youtube_url}")
+        self.send_json_response(response_data)
+        return
         
         # Fallback: Use stream proxy if direct URLs don't work
         print(f"🔄 Using stream proxy as fallback for: {video_id}")
@@ -670,6 +652,7 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
             except Exception as e:
                 print(f"❌ YouTube API extraction failed in deployment for {video_id}: {e}")
         
+
         # Try to get a working audio stream URL using yt-dlp first
         print(f"🔧 Attempting yt-dlp extraction for: {video_id}")
         try:
