@@ -550,25 +550,56 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
             self.send_json_response({'error': 'Video ID required'}, 400)
             return
 
-        print(f"Stream request for video: {video_id}, quality: {quality}")
+        print(f"🎵 Stream request for video: {video_id}, quality: {quality}")
 
         # Check cache first
         cache_key = f"{video_id}_{quality}"
         if cache_key in stream_cache:
             cached_data = stream_cache[cache_key]
             if time.time() - cached_data['timestamp'] < CACHE_DURATION:
-                print(f"Using cached stream URL for: {video_id}")
+                print(f"📦 Using cached stream URL for: {video_id}")
                 self.send_json_response(cached_data['data'])
                 return
             else:
                 # Remove expired cache entry
                 del stream_cache[cache_key]
 
+        # For deployment environments, prioritize YouTube API extraction over yt-dlp
+        # as yt-dlp may not be available or working properly in cloud environments
+        import os
+        is_deployment = os.environ.get('RENDER') or os.environ.get('HEROKU') or os.environ.get('VERCEL')
+        
+        if is_deployment:
+            print(f"🌐 Deployment environment detected, prioritizing YouTube API extraction for: {video_id}")
+            # Try YouTube API extraction first in deployment
+            try:
+                api_result = self._try_youtube_api_extraction(video_id, quality)
+                if api_result and api_result.get('url') and 'googlevideo.com' in api_result['url']:
+                    print(f"✅ Successfully got audio stream via YouTube API for: {video_id}")
+                    response_data = {
+                        'url': api_result['url'],
+                        'mime': api_result.get('mime', 'audio/mp4'),
+                        'bitrate': api_result.get('bitrate', 128),
+                        'itag': api_result.get('itag', '140'),
+                        'videoId': video_id,
+                        'source': api_result.get('source', 'youtube_api_deployment')
+                    }
+                    # Cache the result
+                    stream_cache[cache_key] = {
+                        'data': response_data,
+                        'timestamp': time.time()
+                    }
+                    self.send_json_response(response_data)
+                    return
+            except Exception as e:
+                print(f"❌ YouTube API extraction failed in deployment for {video_id}: {e}")
+        
         # Try to get a working audio stream URL using yt-dlp first
+        print(f"🔧 Attempting yt-dlp extraction for: {video_id}")
         try:
             working_url = self._get_audio_stream_with_ytdlp(video_id, quality)
             if working_url and working_url.startswith('http') and 'googlevideo.com' in working_url:
-                print(f"Successfully got audio stream via yt-dlp for: {video_id}")
+                print(f"✅ Successfully got audio stream via yt-dlp for: {video_id}")
                 response_data = {
                     'url': working_url,
                     'mime': 'audio/mp4',
@@ -584,15 +615,17 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
                 }
                 self.send_json_response(response_data)
                 return
+            else:
+                print(f"❌ yt-dlp returned invalid URL for: {video_id}")
         except Exception as e:
-            print(f"yt-dlp extraction failed: {e}")
+            print(f"❌ yt-dlp extraction failed for {video_id}: {e}")
         
         # Fallback: try to create a working audio URL using alternative methods
-        print(f"Using fallback method for: {video_id}")
+        print(f"🔄 Using fallback extraction methods for: {video_id}")
         try:
             fallback_url = self._create_working_audio_url(video_id, quality)
             if fallback_url and fallback_url.startswith('http') and 'googlevideo.com' in fallback_url:
-                print(f"Successfully got audio stream via fallback for: {video_id}")
+                print(f"✅ Successfully got audio stream via fallback for: {video_id}")
                 response_data = {
                     'url': fallback_url,
                     'mime': 'audio/mp4',
@@ -608,11 +641,13 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
                 }
                 self.send_json_response(response_data)
                 return
+            else:
+                print(f"❌ Fallback extraction returned invalid URL for: {video_id}")
         except Exception as e:
-            print(f"Fallback extraction failed: {e}")
+            print(f"❌ Fallback extraction failed for {video_id}: {e}")
         
         # Final fallback: return error instead of invalid URL
-        print(f"All extraction methods failed for: {video_id}")
+        print(f"💥 All extraction methods failed for: {video_id}")
         self.send_json_response({
             'error': 'Unable to extract audio stream for this video',
             'videoId': video_id,
@@ -755,49 +790,90 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
             import subprocess
             import json
             import time
+            import shutil
+            
+            # Check if yt-dlp is available
+            yt_dlp_path = shutil.which('yt-dlp')
+            python_yt_dlp = shutil.which('python')
+            
+            if not yt_dlp_path and not python_yt_dlp:
+                print(f"❌ yt-dlp not available in deployment environment for {video_id}")
+                return None
             
             # Try multiple yt-dlp configurations to handle rate limiting
-            yt_dlp_configs = [
-                # Basic config with best audio format
-                [
-                    'python', '-m', 'yt_dlp',
-                    '--get-url',
-                    '--format', 'bestaudio[ext=m4a]/bestaudio[ext=mp4]/bestaudio',
-                    '--no-warnings',
-                    '--no-check-certificate',
-                    f'https://www.youtube.com/watch?v={video_id}'
-                ],
-                # With user agent and different format
-                [
-                    'python', '-m', 'yt_dlp',
-                    '--get-url',
-                    '--format', 'bestaudio[ext=m4a]/bestaudio',
-                    '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                    '--no-warnings',
-                    '--no-check-certificate',
-                    f'https://www.youtube.com/watch?v={video_id}'
-                ],
-                # With cookies and different approach
-                [
-                    'python', '-m', 'yt_dlp',
-                    '--get-url',
-                    '--format', 'bestaudio[ext=m4a]/bestaudio',
-                    '--extractor-args', 'youtube:player_client=android',
-                    '--no-warnings',
-                    '--no-check-certificate',
-                    f'https://www.youtube.com/watch?v={video_id}'
-                ],
-                # Alternative with different extractor
-                [
-                    'python', '-m', 'yt_dlp',
-                    '--get-url',
-                    '--format', 'bestaudio',
-                    '--extractor-args', 'youtube:player_client=web',
-                    '--no-warnings',
-                    '--no-check-certificate',
-                    f'https://www.youtube.com/watch?v={video_id}'
-                ]
-            ]
+            yt_dlp_configs = []
+            
+            # Try direct yt-dlp command first
+            if yt_dlp_path:
+                yt_dlp_configs.extend([
+                    # Direct yt-dlp command
+                    [
+                        'yt-dlp',
+                        '--get-url',
+                        '--format', 'bestaudio[ext=m4a]/bestaudio[ext=mp4]/bestaudio',
+                        '--no-warnings',
+                        '--no-check-certificate',
+                        f'https://www.youtube.com/watch?v={video_id}'
+                    ],
+                    # With user agent
+                    [
+                        'yt-dlp',
+                        '--get-url',
+                        '--format', 'bestaudio[ext=m4a]/bestaudio',
+                        '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                        '--no-warnings',
+                        '--no-check-certificate',
+                        f'https://www.youtube.com/watch?v={video_id}'
+                    ]
+                ])
+            
+            # Try python -m yt_dlp
+            if python_yt_dlp:
+                yt_dlp_configs.extend([
+                    # Python module approach
+                    [
+                        'python', '-m', 'yt_dlp',
+                        '--get-url',
+                        '--format', 'bestaudio[ext=m4a]/bestaudio[ext=mp4]/bestaudio',
+                        '--no-warnings',
+                        '--no-check-certificate',
+                        f'https://www.youtube.com/watch?v={video_id}'
+                    ],
+                    # With user agent and different format
+                    [
+                        'python', '-m', 'yt_dlp',
+                        '--get-url',
+                        '--format', 'bestaudio[ext=m4a]/bestaudio',
+                        '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                        '--no-warnings',
+                        '--no-check-certificate',
+                        f'https://www.youtube.com/watch?v={video_id}'
+                    ],
+                    # With cookies and different approach
+                    [
+                        'python', '-m', 'yt_dlp',
+                        '--get-url',
+                        '--format', 'bestaudio[ext=m4a]/bestaudio',
+                        '--extractor-args', 'youtube:player_client=android',
+                        '--no-warnings',
+                        '--no-check-certificate',
+                        f'https://www.youtube.com/watch?v={video_id}'
+                    ],
+                    # Alternative with different extractor
+                    [
+                        'python', '-m', 'yt_dlp',
+                        '--get-url',
+                        '--format', 'bestaudio',
+                        '--extractor-args', 'youtube:player_client=web',
+                        '--no-warnings',
+                        '--no-check-certificate',
+                        f'https://www.youtube.com/watch?v={video_id}'
+                    ]
+                ])
+            
+            if not yt_dlp_configs:
+                print(f"❌ No yt-dlp configurations available for {video_id}")
+                return None
             
             for i, cmd in enumerate(yt_dlp_configs):
                 try:
@@ -805,34 +881,35 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
                         # Add delay between attempts
                         time.sleep(2 + i)
                     
-                    print(f"Trying yt-dlp config {i+1} for {video_id}")
-                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                    print(f"🔧 Trying yt-dlp config {i+1} for {video_id}: {' '.join(cmd[:3])}...")
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=45)
                     
                     if result.returncode == 0 and result.stdout.strip():
                         url = result.stdout.strip()
                         # Validate the URL
                         if url.startswith('http') and ('googlevideo.com' in url or 'youtube.com' in url):
-                            print(f"yt-dlp extracted valid URL for {video_id} with config {i+1}: {url[:100]}...")
+                            print(f"✅ yt-dlp extracted valid URL for {video_id} with config {i+1}: {url[:100]}...")
                             return url
                         else:
-                            print(f"yt-dlp config {i+1} returned invalid URL: {url}")
+                            print(f"❌ yt-dlp config {i+1} returned invalid URL: {url[:100]}...")
                             continue
                     else:
-                        print(f"yt-dlp config {i+1} failed for {video_id}: {result.stderr}")
+                        error_msg = result.stderr.strip() if result.stderr else "No error message"
+                        print(f"❌ yt-dlp config {i+1} failed for {video_id}: {error_msg}")
                         continue
                         
                 except subprocess.TimeoutExpired:
-                    print(f"yt-dlp config {i+1} timeout for {video_id}")
+                    print(f"⏰ yt-dlp config {i+1} timeout for {video_id}")
                     continue
                 except Exception as e:
-                    print(f"yt-dlp config {i+1} error for {video_id}: {e}")
+                    print(f"💥 yt-dlp config {i+1} error for {video_id}: {e}")
                     continue
             
-            print(f"All yt-dlp configurations failed for {video_id}")
+            print(f"💥 All yt-dlp configurations failed for {video_id}")
             return None
                 
         except Exception as e:
-            print(f"yt-dlp general error for {video_id}: {e}")
+            print(f"💥 yt-dlp general error for {video_id}: {e}")
             return None
 
     # All old yt-dlp methods removed to prevent errors
@@ -840,7 +917,7 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
     def _create_working_audio_url(self, video_id: str, quality: str) -> str:
         """Create a working audio URL that the React Native app can handle"""
         try:
-            print(f"Creating working audio URL for: {video_id}")
+            print(f"🔄 Creating working audio URL for: {video_id}")
             
             # Try multiple extraction methods in order of reliability
             extraction_methods = [
@@ -851,36 +928,36 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
             
             for method_name, method_func in extraction_methods:
                 try:
-                    print(f"Trying {method_name} for: {video_id}")
+                    print(f"🔧 Trying {method_name} for: {video_id}")
                     result = method_func(video_id, quality)
                     
                     if result and result.get('url'):
                         url = result['url']
-                        print(f"{method_name} result for {video_id}: {url[:100]}...")
+                        print(f"📄 {method_name} result for {video_id}: {url[:100]}...")
                         
                         # Validate the URL
                         if (url.startswith('http') and 
                             ('googlevideo.com' in url or 'youtube.com' in url) and
                             not url.endswith('.html') and
                             not 'watch?v=' in url):
-                            print(f"Successfully extracted audio URL using {method_name} for: {video_id}")
+                            print(f"✅ Successfully extracted audio URL using {method_name} for: {video_id}")
                             return url
                         else:
-                            print(f"Invalid URL from {method_name}: {url}")
+                            print(f"❌ Invalid URL from {method_name}: {url[:100]}...")
                             continue
                     else:
-                        print(f"{method_name} returned no valid result for: {video_id}")
+                        print(f"❌ {method_name} returned no valid result for: {video_id}")
                         continue
                         
                 except Exception as e:
-                    print(f"{method_name} failed for {video_id}: {e}")
+                    print(f"💥 {method_name} failed for {video_id}: {e}")
                     continue
             
-            print(f"All extraction methods failed for: {video_id}")
+            print(f"💥 All extraction methods failed for: {video_id}")
             return None
             
         except Exception as e:
-            print(f"Failed to create working audio URL: {e}")
+            print(f"💥 Failed to create working audio URL: {e}")
             import traceback
             traceback.print_exc()
             return None
@@ -1160,79 +1237,113 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
     def _try_youtube_api_extraction(self, video_id: str, quality: str) -> dict:
         """Try to extract audio using YouTube's internal API"""
         try:
-            print(f"Trying YouTube API extraction for: {video_id}")
+            print(f"🔧 Trying YouTube API extraction for: {video_id}")
             import requests
             import json
             
             # Try to get video info using YouTube's internal API
-            api_url = f"https://www.youtube.com/youtubei/v1/player"
+            api_url = "https://www.youtube.com/youtubei/v1/player"
             
-            # Use a working client key
-            client_data = {
-                "context": {
-                    "client": {
-                        "clientName": "WEB",
-                        "clientVersion": "2.20231219.01.00"
-                    }
+            # Use multiple client configurations for better compatibility
+            client_configs = [
+                {
+                    "context": {
+                        "client": {
+                            "clientName": "WEB",
+                            "clientVersion": "2.20231219.01.00"
+                        }
+                    },
+                    "videoId": video_id
                 },
-                "videoId": video_id
-            }
+                {
+                    "context": {
+                        "client": {
+                            "clientName": "ANDROID",
+                            "clientVersion": "19.09.37"
+                        }
+                    },
+                    "videoId": video_id
+                },
+                {
+                    "context": {
+                        "client": {
+                            "clientName": "IOS",
+                            "clientVersion": "19.09.3"
+                        }
+                    },
+                    "videoId": video_id
+                }
+            ]
             
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                 'Content-Type': 'application/json',
                 'Accept': 'application/json',
+                'Origin': 'https://www.youtube.com',
+                'Referer': 'https://www.youtube.com/',
             }
             
-            response = requests.post(api_url, json=client_data, headers=headers, timeout=30)
-            
-            if response.status_code == 200:
-                data = response.json()
-                
-                # Extract streaming data
-                streaming_data = data.get('streamingData', {})
-                if streaming_data:
-                    adaptive_formats = streaming_data.get('adaptiveFormats', [])
+            for i, client_data in enumerate(client_configs):
+                try:
+                    print(f"🔧 Trying YouTube API config {i+1} for: {video_id}")
+                    response = requests.post(api_url, json=client_data, headers=headers, timeout=30)
                     
-                    # Filter for audio-only formats
-                    audio_formats = []
-                    for fmt in adaptive_formats:
-                        mime_type = fmt.get('mimeType', '')
-                        if mime_type.startswith('audio/'):
-                            audio_formats.append(fmt)
-                    
-                    if audio_formats:
-                        # Choose best quality
-                        quality_map = {'high': 192, 'medium': 128, 'low': 96}
-                        target_bitrate = quality_map.get(quality, 128)
+                    if response.status_code == 200:
+                        data = response.json()
                         
-                        best_format = None
-                        best_diff = float('inf')
+                        # Extract streaming data
+                        streaming_data = data.get('streamingData', {})
+                        if streaming_data:
+                            adaptive_formats = streaming_data.get('adaptiveFormats', [])
+                            
+                            # Filter for audio-only formats
+                            audio_formats = []
+                            for fmt in adaptive_formats:
+                                mime_type = fmt.get('mimeType', '')
+                                if mime_type.startswith('audio/'):
+                                    audio_formats.append(fmt)
+                            
+                            if audio_formats:
+                                # Choose best quality
+                                quality_map = {'high': 192, 'medium': 128, 'low': 96}
+                                target_bitrate = quality_map.get(quality, 128)
+                                
+                                best_format = None
+                                best_diff = float('inf')
+                                
+                                for fmt in audio_formats:
+                                    bitrate = fmt.get('bitrate', 0)
+                                    diff = abs(bitrate - target_bitrate)
+                                    if diff < best_diff:
+                                        best_format = fmt
+                                        best_diff = diff
+                                
+                                if best_format and best_format.get('url'):
+                                    stream_url = best_format['url']
+                                    if stream_url.startswith('http') and 'googlevideo.com' in stream_url:
+                                        print(f"✅ YouTube API extraction successful with config {i+1} for: {video_id}")
+                                        return {
+                                            'url': stream_url,
+                                            'mime': best_format.get('mimeType', 'audio/mp4'),
+                                            'bitrate': best_format.get('bitrate', 128),
+                                            'itag': best_format.get('itag', '140'),
+                                            'videoId': video_id,
+                                            'source': f'youtube_api_extraction_config_{i+1}'
+                                        }
+                        else:
+                            print(f"❌ No streaming data in YouTube API response for config {i+1}")
+                    else:
+                        print(f"❌ YouTube API config {i+1} returned status {response.status_code}")
                         
-                        for fmt in audio_formats:
-                            bitrate = fmt.get('bitrate', 0)
-                            diff = abs(bitrate - target_bitrate)
-                            if diff < best_diff:
-                                best_format = fmt
-                                best_diff = diff
-                        
-                        if best_format and best_format.get('url'):
-                            stream_url = best_format['url']
-                            if stream_url.startswith('http') and 'googlevideo.com' in stream_url:
-                                return {
-                                    'url': stream_url,
-                                    'mime': best_format.get('mimeType', 'audio/mp4'),
-                                    'bitrate': best_format.get('bitrate', 128),
-                                    'itag': best_format.get('itag', '140'),
-                                    'videoId': video_id,
-                                    'source': 'youtube_api_extraction'
-                                }
+                except Exception as e:
+                    print(f"💥 YouTube API config {i+1} failed: {e}")
+                    continue
             
-            print(f"YouTube API extraction failed for: {video_id}")
+            print(f"❌ All YouTube API configurations failed for: {video_id}")
             return None
             
         except Exception as e:
-            print(f"YouTube API extraction failed: {e}")
+            print(f"💥 YouTube API extraction failed: {e}")
             return None
 
     def _get_working_stream_url(self, video_id: str, quality: str) -> dict:
