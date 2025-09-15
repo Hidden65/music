@@ -667,27 +667,11 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
             print(f"💥 Stream proxy error for {video_id}: {e}")
             import traceback
             traceback.print_exc()
-
-            # Try alternative extraction methods as fallback
-            try:
-                print(f"🔄 Trying alternative extraction methods for {video_id}")
-                alt_result = self._try_alternative_stream_extraction(video_id, quality)
-                if alt_result:
-                    print(f"✅ Alternative extraction successful for {video_id}")
-                    self._proxy_audio_stream_direct(alt_result['url'])
-                    return
-            except Exception as alt_e:
-                print(f"❌ Alternative extraction also failed: {alt_e}")
-
+            # Do not try alternative extraction; return a single error response
             self.send_json_response({
-                'error': f'Stream proxy error: {str(e)}',
+                'error': 'This song cannot be played right now',
                 'videoId': video_id,
-                'source': 'stream_proxy_error',
-                'suggestions': [
-                    'Try a different song',
-                    'Check if the video is available in your region',
-                    'The video might have copyright restrictions'
-                ]
+                'source': 'stream_proxy_error'
             })
 
     def _proxy_audio_stream_direct(self, stream_url: str) -> None:
