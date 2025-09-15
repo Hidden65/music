@@ -1,1 +1,4 @@
 ytmusicapi
+requests
+# yt-dlp is optional and only used when USE_YTDLP=1
+yt-dlp>=2024.1.1
