@@ -566,8 +566,8 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
 
         # Create YouTube iframe embed URL with optimized settings for audio playback
         embed_url = f"https://www.youtube.com/embed/{video_id}"
-        
-        # Player configuration for hidden audio playback
+
+        # Enhanced player configuration for hidden audio playback with better embedding support
         player_config = {
             'height': '0',
             'width': '0',
@@ -585,17 +585,31 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
                 'cc_load_policy': 0,
                 'start': 0,
                 'wmode': 'opaque',
-                'origin': 'https://www.youtube.com'
+                'origin': 'https://www.youtube.com',
+                # Additional parameters to help bypass embedding restrictions
+                'widget_referrer': 'https://www.youtube.com',
+                'embed_referrer': 'https://www.youtube.com',
+                'hl': 'en',
+                'cc_lang_pref': 'en',
+                # Try different approaches for embedding
+                'feature': 'player_embedded',
+                'enable_csi': '0',
+                'use_cipher_signature': 'True'
             }
         }
-        
+
         response_data = {
             'embedUrl': embed_url,
             'videoId': video_id,
             'playerConfig': player_config,
-            'source': 'youtube_iframe_api'
+            'source': 'youtube_iframe_api',
+            'embeddingHints': [
+                'If this video fails to play, it may have embedding restrictions set by the content owner.',
+                'The app will automatically try alternative versions of the song.',
+                'Some videos cannot be played due to YouTube\'s embedding policies.'
+            ]
         }
-        
+
         self.send_json_response(response_data)
 
     def handle_api_stream_proxy(self, query_string: str) -> None:
