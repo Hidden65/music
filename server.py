@@ -635,13 +635,13 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
                 audio_url = api_result['url']
                 print(f"✅ Got audio URL from YouTube API: {audio_url[:100]}...")
             
-            # Method 2: Try simple extraction if API failed
+            # Method 2: Try modern/simple extraction if API failed
             if not audio_url:
-                print(f"🔧 Trying simple extraction for: {video_id}")
-                simple_result = self._try_simple_youtube_extraction(video_id, quality)
+                print(f"🔧 Trying modern YouTube extraction for: {video_id}")
+                simple_result = self._try_modern_youtube_extraction(video_id, quality)
                 if simple_result and simple_result.get('url') and 'googlevideo.com' in simple_result['url']:
                     audio_url = simple_result['url']
-                    print(f"✅ Got audio URL from simple extraction: {audio_url[:100]}...")
+                    print(f"✅ Got audio URL from modern extraction: {audio_url[:100]}...")
             
             # Method 3: Try yt-dlp if enabled and available
             if not audio_url and USE_YTDLP and YTDLP_AVAILABLE:
