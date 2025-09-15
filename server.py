@@ -656,6 +656,17 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
 
         print(f"🔄 Stream proxy request for video: {video_id}, quality: {quality}")
 
+        # Serve from cache when fresh
+        cached = stream_cache.get(video_id)
+        now = time.time()
+        if cached and isinstance(cached, dict):
+            url = cached.get('url')
+            ts = cached.get('ts', 0)
+            if url and (now - ts) < CACHE_DURATION:
+                print(f"🗄️  Using cached stream URL for: {video_id}")
+                self.send_json_response({'url': url, 'videoId': video_id, 'source': 'cache'})
+                return
+
         try:
             # Unified extractor
             extractor = StreamExtractor(quality)
@@ -671,6 +682,11 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
             if audio_url:
                 # Return JSON with direct audio URL for React Native client
                 print(f"✅ Returning direct audio URL for: {video_id}")
+                # Cache it
+                try:
+                    stream_cache[video_id] = {'url': audio_url, 'ts': time.time()}
+                except Exception:
+                    pass
                 self.send_json_response({
                     'url': audio_url,
                     'videoId': video_id,
@@ -699,6 +715,8 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
         """Direct audio stream proxy that works like YouTube Music"""
         try:
             import requests
+            # Transmuxing to HLS is not implemented here to avoid heavy deps at runtime.
+            # If needed, implement an HLS endpoint that wraps this function's output via ffmpeg.
             
             print(f"🎵 Fetching audio stream: {stream_url[:100]}...")
             
