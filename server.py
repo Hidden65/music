@@ -652,9 +652,13 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
                     print(f"✅ Got audio URL from yt-dlp: {audio_url[:100]}...")
             
             if audio_url:
-                # Proxy the audio stream
-                print(f"📡 Proxying audio stream for: {video_id}")
-                self._proxy_audio_stream_direct(audio_url)
+                # Return JSON with direct audio URL for React Native client
+                print(f"✅ Returning direct audio URL for: {video_id}")
+                self.send_json_response({
+                    'url': audio_url,
+                    'videoId': video_id,
+                    'source': 'stream_proxy'
+                })
             else:
                 print(f"❌ No audio URL found for: {video_id}")
                 self.send_json_response({
