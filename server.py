@@ -653,10 +653,27 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
             print(f"💥 Stream proxy error for {video_id}: {e}")
             import traceback
             traceback.print_exc()
+
+            # Try alternative extraction methods as fallback
+            try:
+                print(f"🔄 Trying alternative extraction methods for {video_id}")
+                alt_result = self._try_alternative_stream_extraction(video_id, quality)
+                if alt_result:
+                    print(f"✅ Alternative extraction successful for {video_id}")
+                    self._proxy_audio_stream_direct(alt_result['url'])
+                    return
+            except Exception as alt_e:
+                print(f"❌ Alternative extraction also failed: {alt_e}")
+
             self.send_json_response({
                 'error': f'Stream proxy error: {str(e)}',
                 'videoId': video_id,
-                'source': 'stream_proxy_error'
+                'source': 'stream_proxy_error',
+                'suggestions': [
+                    'Try a different song',
+                    'Check if the video is available in your region',
+                    'The video might have copyright restrictions'
+                ]
             })
 
     def _proxy_audio_stream_direct(self, stream_url: str) -> None:
@@ -668,10 +685,12 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
             
             # Use multiple user agents and headers to bypass restrictions
             user_agents = [
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1',
-                'Mozilla/5.0 (Android 10; Mobile; rv:109.0) Gecko/109.0 Firefox/109.0'
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+                'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+                'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1',
+                'Mozilla/5.0 (Android 14; Mobile; rv:124.0) Gecko/124.0 Firefox/124.0',
+                'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0'
             ]
             
             response = None
@@ -1042,16 +1061,102 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
             return None
 
     def _try_youtube_api_extraction(self, video_id: str, quality: str) -> dict:
-        """Try to extract audio using YouTube's internal API with updated approach"""
+        """Enhanced YouTube extraction with better error handling and multiple fallback methods"""
         try:
-            print(f"🔧 Trying YouTube API extraction for: {video_id}")
+            print(f"🔧 Trying enhanced YouTube extraction for: {video_id}")
+
+            # Method 1: Try YouTube Music API first (most reliable for music)
+            music_result = self._try_youtube_music_api(video_id, quality)
+            if music_result:
+                return music_result
+
+            # Method 2: Try standard YouTube API
+            api_result = self._try_youtube_standard_api(video_id, quality)
+            if api_result:
+                return api_result
+
+            # Method 3: Try direct HTML parsing as last resort
+            html_result = self._try_direct_html_extraction(video_id, quality)
+            if html_result:
+                return html_result
+
+            print(f"❌ All extraction methods failed for: {video_id}")
+            return None
+
+        except Exception as e:
+            print(f"💥 Enhanced extraction failed: {e}")
+            return None
+
+    def _try_youtube_music_api(self, video_id: str, quality: str) -> dict:
+        """Try YouTube Music API extraction"""
+        try:
+            print(f"🎵 Trying YouTube Music API for: {video_id}")
             import requests
             import json
-            
-            # Use YouTube's internal API with updated client versions
+
+            api_url = "https://music.youtube.com/youtubei/v1/player"
+
+            client_data = {
+                "context": {
+                    "client": {
+                        "clientName": "WEB_REMIX",
+                        "clientVersion": "1.20231219.01.00",
+                        "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                    }
+                },
+                "videoId": video_id,
+                "params": "CgIQBg=="
+            }
+
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+                'Content-Type': 'application/json',
+                'Accept': 'application/json',
+                'Origin': 'https://music.youtube.com',
+                'Referer': 'https://music.youtube.com/',
+            }
+
+            response = requests.post(api_url, json=client_data, headers=headers, timeout=30)
+
+            if response.status_code == 200:
+                data = response.json()
+                streaming_data = data.get('streamingData', {})
+
+                if streaming_data:
+                    adaptive_formats = streaming_data.get('adaptiveFormats', [])
+                    audio_formats = [fmt for fmt in adaptive_formats if fmt.get('mimeType', '').startswith('audio/')]
+
+                    if audio_formats:
+                        quality_map = {'high': 192, 'medium': 128, 'low': 96}
+                        target_bitrate = quality_map.get(quality, 128)
+
+                        best_format = min(audio_formats,
+                                        key=lambda fmt: abs(fmt.get('bitrate', 128) - target_bitrate))
+
+                        if best_format.get('url'):
+                            return {
+                                'url': best_format['url'],
+                                'mime': best_format.get('mimeType', 'audio/mp4'),
+                                'bitrate': best_format.get('bitrate', 128),
+                                'itag': best_format.get('itag', '140'),
+                                'videoId': video_id,
+                                'source': 'youtube_music_api'
+                            }
+
+            return None
+        except Exception as e:
+            print(f"❌ YouTube Music API failed: {e}")
+            return None
+
+    def _try_youtube_standard_api(self, video_id: str, quality: str) -> dict:
+        """Try standard YouTube API extraction"""
+        try:
+            print(f"📺 Trying standard YouTube API for: {video_id}")
+            import requests
+            import json
+
             api_url = "https://www.youtube.com/youtubei/v1/player"
-            
-            # Updated client configurations for better compatibility
+
             client_configs = [
                 {
                     "context": {
@@ -1062,17 +1167,8 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
                             "userAgent": "com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip"
                         }
                     },
-                    "videoId": video_id
-                },
-                {
-                    "context": {
-                        "client": {
-                            "clientName": "IOS",
-                            "clientVersion": "19.09.3",
-                            "userAgent": "com.google.ios.youtube/19.09.3 (iPhone14,3; U; CPU iOS 15_6 like Mac OS X)"
-                        }
-                    },
-                    "videoId": video_id
+                    "videoId": video_id,
+                    "params": "CgIQBg=="
                 },
                 {
                     "context": {
@@ -1082,79 +1178,130 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
                             "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
                         }
                     },
-                    "videoId": video_id
+                    "videoId": video_id,
+                    "params": "CgIQBg=="
                 }
             ]
-            
+
             headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
                 'Content-Type': 'application/json',
                 'Accept': 'application/json',
                 'Origin': 'https://www.youtube.com',
                 'Referer': 'https://www.youtube.com/',
             }
-            
+
             for i, client_data in enumerate(client_configs):
                 try:
-                    print(f"🔧 Trying YouTube API config {i+1} for: {video_id}")
                     response = requests.post(api_url, json=client_data, headers=headers, timeout=30)
-                    
+
                     if response.status_code == 200:
                         data = response.json()
-                        
-                        # Extract streaming data
                         streaming_data = data.get('streamingData', {})
+
                         if streaming_data:
                             adaptive_formats = streaming_data.get('adaptiveFormats', [])
-                            
-                            # Filter for audio-only formats
-                            audio_formats = []
-                            for fmt in adaptive_formats:
-                                mime_type = fmt.get('mimeType', '')
-                                if mime_type.startswith('audio/'):
-                                    audio_formats.append(fmt)
-                            
+                            audio_formats = [fmt for fmt in adaptive_formats if fmt.get('mimeType', '').startswith('audio/')]
+
                             if audio_formats:
-                                # Choose best quality
                                 quality_map = {'high': 192, 'medium': 128, 'low': 96}
                                 target_bitrate = quality_map.get(quality, 128)
-                                
-                                best_format = None
-                                best_diff = float('inf')
-                                
-                                for fmt in audio_formats:
-                                    bitrate = fmt.get('bitrate', 0)
-                                    diff = abs(bitrate - target_bitrate)
-                                    if diff < best_diff:
-                                        best_format = fmt
-                                        best_diff = diff
-                                
-                                if best_format and best_format.get('url'):
-                                    stream_url = best_format['url']
-                                    if stream_url.startswith('http') and 'googlevideo.com' in stream_url:
-                                        print(f"✅ YouTube API extraction successful with config {i+1} for: {video_id}")
-                                        return {
-                                            'url': stream_url,
-                                            'mime': best_format.get('mimeType', 'audio/mp4'),
-                                            'bitrate': best_format.get('bitrate', 128),
-                                            'itag': best_format.get('itag', '140'),
-                                            'videoId': video_id,
-                                            'source': f'youtube_api_extraction_config_{i+1}'
-                                        }
-                        else:
-                            print(f"❌ No streaming data in YouTube API response for config {i+1}")
-                    else:
-                        print(f"❌ YouTube API config {i+1} returned status {response.status_code}")
-                        
+
+                                best_format = min(audio_formats,
+                                                key=lambda fmt: abs(fmt.get('bitrate', 128) - target_bitrate))
+
+                                if best_format.get('url'):
+                                    return {
+                                        'url': best_format['url'],
+                                        'mime': best_format.get('mimeType', 'audio/mp4'),
+                                        'bitrate': best_format.get('bitrate', 128),
+                                        'itag': best_format.get('itag', '140'),
+                                        'videoId': video_id,
+                                        'source': f'youtube_standard_api_config_{i+1}'
+                                    }
                 except Exception as e:
-                    print(f"💥 YouTube API config {i+1} failed: {e}")
                     continue
-            
-            print(f"❌ All YouTube API configurations failed for: {video_id}")
+
             return None
-            
         except Exception as e:
-            print(f" YouTube API extraction failed: {e}")
+            print(f"❌ Standard YouTube API failed: {e}")
+            return None
+
+    def _try_direct_html_extraction(self, video_id: str, quality: str) -> dict:
+        """Try direct HTML parsing as fallback"""
+        try:
+            print(f"🌐 Trying direct HTML extraction for: {video_id}")
+            import requests
+            import re
+            import json
+
+            url = f"https://www.youtube.com/watch?v={video_id}"
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'DNT': '1',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+            }
+
+            response = requests.get(url, headers=headers, timeout=30)
+            if response.status_code != 200:
+                return None
+
+            html_content = response.text
+
+            # Try multiple patterns to find streaming data
+            patterns = [
+                r'ytInitialPlayerResponse\s*=\s*({.+?});',
+                r'var ytInitialPlayerResponse = ({.+?});',
+                r'"playerResponse":\s*({.+?})',
+                r'window\["ytInitialPlayerResponse"\]\s*=\s*({.+?});',
+            ]
+
+            player_response = None
+            for pattern in patterns:
+                match = re.search(pattern, html_content, re.DOTALL)
+                if match:
+                    try:
+                        player_response = json.loads(match.group(1))
+                        break
+                    except json.JSONDecodeError:
+                        continue
+
+            if not player_response:
+                return None
+
+            streaming_data = player_response.get('streamingData', {})
+            if not streaming_data:
+                return None
+
+            adaptive_formats = streaming_data.get('adaptiveFormats', [])
+            audio_formats = [fmt for fmt in adaptive_formats if fmt.get('mimeType', '').startswith('audio/')]
+
+            if not audio_formats:
+                return None
+
+            quality_map = {'high': 192, 'medium': 128, 'low': 96}
+            target_bitrate = quality_map.get(quality, 128)
+
+            best_format = min(audio_formats,
+                            key=lambda fmt: abs(fmt.get('bitrate', 128) - target_bitrate))
+
+            if best_format.get('url'):
+                return {
+                    'url': best_format['url'],
+                    'mime': best_format.get('mimeType', 'audio/mp4'),
+                    'bitrate': best_format.get('bitrate', 128),
+                    'itag': best_format.get('itag', '140'),
+                    'videoId': video_id,
+                    'source': 'direct_html_extraction'
+                }
+
+            return None
+        except Exception as e:
+            print(f"❌ Direct HTML extraction failed: {e}")
             return None
 
     def _get_working_stream_url(self, video_id: str, quality: str) -> dict:
@@ -2108,11 +2255,11 @@ if __name__ == '__main__':
     
     port = int(os.environ.get('PORT', args.port))
     
-    print(f"🎵 Wave Music Streaming Server")
-    print(f"📡 Server starting on http://0.0.0.0:{port}")
-    print(f"🔍 YTMusic API: {'✅ Available' if YTMUSIC_AVAILABLE else '❌ Not available (using demo mode)'}")
-    print(f"💾 Database: SQLite ({DB_PATH})")
-    print("🚀 Ready to serve music!")
+    print(f"[MUSIC] Wave Music Streaming Server")
+    print(f"[SERVER] Starting on http://0.0.0.0:{port}")
+    print(f"[API] YTMusic API: {'Available' if YTMUSIC_AVAILABLE else 'Not available (using demo mode)'}")
+    print(f"[DB] Database: SQLite ({DB_PATH})")
+    print("[READY] Ready to serve music!")
     
     try:
         with ThreadingTCPServer(('0.0.0.0', port), YTMusicRequestHandler) as httpd:
