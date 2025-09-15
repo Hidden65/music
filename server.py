@@ -329,6 +329,27 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
         results: List[Dict[str, Any]] = []
         
         if q:
+            # If query looks like a direct YouTube video ID, try to resolve it first
+            if re.fullmatch(r'[A-Za-z0-9_-]{11}', q):
+                try:
+                    import urllib.request as _req
+                    oembed_url = f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={q}&format=json"
+                    req = _req.Request(oembed_url, headers={'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json'})
+                    with _req.urlopen(req, timeout=8) as resp:
+                        if resp.getcode() == 200:
+                            data = json.loads(resp.read().decode('utf-8'))
+                            # Build a direct song entry for this videoId
+                            results.append({
+                                'videoId': q,
+                                'title': data.get('title') or q,
+                                'artist': data.get('author_name') or 'Unknown Artist',
+                                'duration': None,
+                                'thumbnail': f"https://i.ytimg.com/vi/{q}/hqdefault.jpg"
+                            })
+                except Exception:
+                    # Ignore oembed failures; continue with regular search
+                    pass
+
             if self.ytmusic:
                 try:
                     # Search for songs
@@ -359,8 +380,16 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
                 else:
                     results = get_demo_results(q)
         
-        # Filter out results without video IDs
-        results = [r for r in results if r.get('videoId')][:20]
+        # Filter out results without video IDs and de-duplicate by videoId, keeping earlier (ID match first)
+        deduped = []
+        seen = set()
+        for r in results:
+            vid = r.get('videoId')
+            if not vid or vid in seen:
+                continue
+            seen.add(vid)
+            deduped.append(r)
+        results = deduped[:20]
         
         self.send_json_response({'results': results})
 
