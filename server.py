@@ -212,6 +212,9 @@ def get_demo_results(query: str) -> List[Dict[str, Any]]:
     """Return empty results when YTMusic is not available"""
     return []
 
+from server_core import StreamExtractor
+
+
 class YTMusicRequestHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         # Initialize YouTube Music API
@@ -625,31 +628,16 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
         print(f"🔄 Stream proxy request for video: {video_id}, quality: {quality}")
 
         try:
-            # Try multiple methods to get audio stream
-            audio_url = None
-            
-            # Method 1: Try YouTube API extraction
-            print(f"🔧 Trying YouTube API extraction for: {video_id}")
-            api_result = self._try_youtube_api_extraction(video_id, quality)
-            if api_result and api_result.get('url') and 'googlevideo.com' in api_result['url']:
-                audio_url = api_result['url']
-                print(f"✅ Got audio URL from YouTube API: {audio_url[:100]}...")
-            
-            # Method 2: Try modern/simple extraction if API failed
-            if not audio_url:
-                print(f"🔧 Trying modern YouTube extraction for: {video_id}")
-                simple_result = self._try_modern_youtube_extraction(video_id, quality)
-                if simple_result and simple_result.get('url') and 'googlevideo.com' in simple_result['url']:
-                    audio_url = simple_result['url']
-                    print(f"✅ Got audio URL from modern extraction: {audio_url[:100]}...")
-            
-            # Method 3: Try yt-dlp if enabled and available
+            # Unified extractor
+            extractor = StreamExtractor(quality)
+            best = extractor.get_best_audio_url(video_id)
+            audio_url = best.get('url') if isinstance(best, dict) else None
             if not audio_url and USE_YTDLP and YTDLP_AVAILABLE:
                 print(f"🔧 Trying yt-dlp for: {video_id}")
                 ytdlp_url = self._get_audio_stream_with_ytdlp(video_id, quality)
                 if ytdlp_url and 'googlevideo.com' in ytdlp_url:
                     audio_url = ytdlp_url
-                    print(f"✅ Got audio URL from yt-dlp: {audio_url[:100]}...")
+                    best = {'url': audio_url, 'source': 'ytdlp'}
             
             if audio_url:
                 # Return JSON with direct audio URL for React Native client
@@ -657,7 +645,7 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
                 self.send_json_response({
                     'url': audio_url,
                     'videoId': video_id,
-                    'source': 'stream_proxy'
+                    'source': (best.get('source') if isinstance(best, dict) else 'stream_proxy')
                 })
             else:
                 print(f"❌ No audio URL found for: {video_id}")
