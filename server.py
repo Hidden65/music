@@ -9,6 +9,8 @@ import time
 import sqlite3
 import urllib.request
 import urllib.error
+import tempfile
+import base64
 try:
     from yt_dlp import YoutubeDL  # type: ignore
     YTDLP_AVAILABLE = True
@@ -26,6 +28,11 @@ ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(ROOT_DIR, 'wave_music.db')
 # Optional: external backend for fallback (disabled by default)
 REMOTE_BASE_URL = os.environ.get('REMOTE_BASE_URL')
+YTDLP_COOKIES_B64 = os.environ.get('YTDLP_COOKIES_B64')  # Base64-encoded Netscape cookie file
+YTDLP_COOKIES_PATH = os.environ.get('YTDLP_COOKIES_PATH')  # Absolute path to cookies.txt
+YTDLP_UA = os.environ.get('YTDLP_UA', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36')
+YTDLP_LANG = os.environ.get('YTDLP_LANG', 'en-US,en;q=0.9')
+YTMUSIC_HEADERS_B64 = os.environ.get('YTMUSIC_HEADERS_B64')  # Base64 of headers_auth.json
 
 def init_database():
     """Initialize SQLite database for storing user data (fallback if Firebase not available)"""
@@ -179,6 +186,14 @@ class YTMusicRequestHandler(SimpleHTTPRequestHandler):
         if YTMUSIC_AVAILABLE:
             headers_path = os.path.join(ROOT_DIR, 'headers_auth.json')
             try:
+                # Allow providing headers via env for headless hosting
+                if YTMUSIC_HEADERS_B64 and not os.path.exists(headers_path):
+                    try:
+                        decoded = base64.b64decode(YTMUSIC_HEADERS_B64)
+                        with open(headers_path, 'wb') as f:
+                            f.write(decoded)
+                    except Exception as e:
+                        print(f"Failed writing YTMusic headers from env: {e}")
                 if os.path.exists(headers_path):
                     self.ytmusic = YTMusic(headers_path)
                 else:
@@ -1141,6 +1156,26 @@ Y hacer de tu cuerpo todo un manuscrito''',
         if not YTDLP_AVAILABLE:
             self.send_json_response({'error': 'yt-dlp not installed on server'}, 501)
             return
+        # Small in-memory cache to reduce extractor calls and rate limits
+        global _AUDIO_CACHE
+        try:
+            _AUDIO_CACHE
+        except NameError:
+            _AUDIO_CACHE = {}
+        import time as _t
+        now = int(_t.time())
+        entry = _AUDIO_CACHE.get(video_id)
+        if entry and isinstance(entry, dict):
+            if now - entry.get('ts', 0) < 600 and entry.get('url'):  # 10 minutes TTL
+                self.send_json_response({
+                    'url': entry['url'],
+                    'abr': entry.get('abr'),
+                    'acodec': entry.get('acodec'),
+                    'ext': entry.get('ext'),
+                    'videoId': video_id,
+                    'cached': True
+                })
+                return
         try:
             url = f"https://www.youtube.com/watch?v={video_id}"
             # Request best audio; never fallback to best video
@@ -1152,7 +1187,25 @@ Y hacer de tu cuerpo todo un manuscrito''',
                 'ignoreerrors': True,
                 'skip_download': True,
                 'cachedir': False,
+                'http_headers': {
+                    'User-Agent': YTDLP_UA,
+                    'Accept-Language': YTDLP_LANG,
+                    'Referer': 'https://www.youtube.com/'
+                }
             }
+            # Attach cookies if provided (mitigates 429/age-gate)
+            temp_cookie_path = None
+            if YTDLP_COOKIES_PATH and os.path.exists(YTDLP_COOKIES_PATH):
+                ydl_opts['cookiefile'] = YTDLP_COOKIES_PATH
+            elif YTDLP_COOKIES_B64:
+                try:
+                    decoded = base64.b64decode(YTDLP_COOKIES_B64)
+                    fd, temp_cookie_path = tempfile.mkstemp(prefix='yt_cookies_', suffix='.txt')
+                    with os.fdopen(fd, 'wb') as f:
+                        f.write(decoded)
+                    ydl_opts['cookiefile'] = temp_cookie_path
+                except Exception as e:
+                    print(f"Failed to load cookies from env: {e}")
             with YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
             if not info:
@@ -1189,10 +1242,19 @@ Y hacer de tu cuerpo todo un manuscrito''',
             if not stream_url:
                 self.send_json_response({'error': 'No audio-only stream found'}, 502)
                 return
+            # Cache and respond
+            _AUDIO_CACHE[video_id] = {'url': stream_url, 'abr': abr, 'acodec': acodec, 'ext': ext, 'ts': now}
             self.send_json_response({'url': stream_url, 'abr': abr, 'acodec': acodec, 'ext': ext, 'videoId': video_id})
         except Exception as e:
             print(f"yt-dlp extraction error for {video_id}: {e}")
             self.send_json_response({'error': 'Audio extraction failed'}, 500)
+        finally:
+            # Cleanup temp cookie file if created
+            try:
+                if temp_cookie_path and os.path.exists(temp_cookie_path):
+                    os.remove(temp_cookie_path)
+            except Exception:
+                pass
 
     def do_OPTIONS(self):  # noqa: N802 (keep stdlib naming)
         """Handle CORS preflight requests"""
